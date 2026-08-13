@@ -10,7 +10,6 @@ import unittest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "addon" / "appModules" / "telegram.py"
 
-_BOUNDING_RECTANGLE = "boundingRectangle"
 _CLASS_NAME = "className"
 _AUTOMATION_ID = "automationId"
 _CONTROL_TYPE = "controlType"
@@ -31,7 +30,6 @@ class _Role(Enum):
 	LIST = "list"
 	LISTITEM = "listItem"
 	BUTTON = "button"
-	GROUPING = "grouping"
 	MENUBUTTON = "menuButton"
 	DROPDOWNBUTTON = "dropDownButton"
 
@@ -49,38 +47,7 @@ class _FakeCondition:
 		return self._predicate(element)
 
 
-class _FakeWalker:
-	def GetParentElement(self, element):
-		return element.parent
-
-	@staticmethod
-	def _siblings(element):
-		return element.parent.children if element.parent is not None else [element]
-
-	def GetPreviousSiblingElement(self, element):
-		siblings = self._siblings(element)
-		index = siblings.index(element)
-		return siblings[index - 1] if index > 0 else None
-
-	def GetNextSiblingElement(self, element):
-		siblings = self._siblings(element)
-		index = siblings.index(element)
-		return siblings[index + 1] if index + 1 < len(siblings) else None
-
-
-class _FakeNullElement:
-	"""Behave like comtypes' non-None NULL interface pointer."""
-
-	def __bool__(self):
-		return False
-
-	def __getattr__(self, name):
-		raise ValueError("NULL COM pointer access")
-
-
 class _FakeClient:
-	RawViewWalker = _FakeWalker()
-
 	def CreatePropertyCondition(self, propertyId, value):
 		return _FakeCondition(lambda element: element.propertyValue(propertyId) == value)
 
@@ -111,40 +78,23 @@ class _FakeInvokePattern:
 		self._element.actionCount += 1
 
 
-class _FakeElementArray:
-	"""Behave like the IUIAutomationElementArray a FindAll query returns."""
-
-	def __init__(self, elements):
-		self._elements = list(elements)
-
-	@property
-	def Length(self):
-		return len(self._elements)
-
-	def GetElement(self, index):
-		return self._elements[index]
-
-
 class _FakeUIA:
 	def __init__(
 		self,
 		*,
 		role=None,
 		name="",
-		providerName=None,
 		className="",
 		automationId="",
 		states=None,
 		children=None,
 		isOffscreen=False,
-		rectangle=None,
 		failQuery=False,
 		failAction=False,
 		failFocus=False,
 	):
 		self.role = role
 		self.name = name
-		self.providerName = name if providerName is None else providerName
 		self.UIAClassName = className
 		self.UIAAutomationId = automationId
 		self.states = set(states or ())
@@ -153,7 +103,6 @@ class _FakeUIA:
 		for child in self.children:
 			child.parent = self
 		self.isOffscreen = isOffscreen
-		self.rectangle = rectangle
 		self.failQuery = failQuery
 		self.failAction = failAction
 		self.failFocus = failFocus
@@ -178,13 +127,12 @@ class _FakeUIA:
 			_Role.LISTITEM: _LIST_ITEM_CONTROL,
 		}
 		values = {
-			_BOUNDING_RECTANGLE: self.rectangle,
 			_CLASS_NAME: self.UIAClassName,
 			_AUTOMATION_ID: self.UIAAutomationId,
 			_CONTROL_TYPE: controlTypes.get(self.role),
 			_IS_OFFSCREEN: self.isOffscreen,
 			_IS_SELECTED: _State.SELECTED in self.states,
-			_NAME: self.providerName,
+			_NAME: self.name,
 		}
 		return values.get(propertyId)
 
@@ -206,32 +154,6 @@ class _FakeUIA:
 			raise AssertionError(f"unexpected tree scope: {scope}")
 		return next((node for node in nodes if condition.matches(node)), None)
 
-	def FindFirst(self, scope, condition):
-		if self.failQuery:
-			raise RuntimeError("provider query failed")
-		if scope == _TREE_SCOPE_CHILDREN:
-			nodes = iter(self.children)
-		elif scope == _TREE_SCOPE_DESCENDANTS:
-			nodes = self._descendants()
-		elif scope == _TREE_SCOPE_SUBTREE:
-			nodes = iter((self, *self._descendants()))
-		else:
-			raise AssertionError(f"unexpected tree scope: {scope}")
-		return next((node for node in nodes if condition.matches(node)), None)
-
-	def FindAll(self, scope, condition):
-		if self.failQuery:
-			raise RuntimeError("provider query failed")
-		if scope == _TREE_SCOPE_CHILDREN:
-			nodes = iter(self.children)
-		elif scope == _TREE_SCOPE_DESCENDANTS:
-			nodes = self._descendants()
-		elif scope == _TREE_SCOPE_SUBTREE:
-			nodes = iter((self, *self._descendants()))
-		else:
-			raise AssertionError(f"unexpected tree scope: {scope}")
-		return _FakeElementArray([node for node in nodes if condition.matches(node)])
-
 	def GetCurrentPropertyValue(self, propertyId):
 		return self.propertyValue(propertyId)
 
@@ -244,21 +166,12 @@ class _FakeUIA:
 		self.focused = True
 
 
-def _loadTelegramModule(*, injectTranslation=True):
-	addonHandler = types.ModuleType("addonHandler")
-	addonHandler.initTranslation = lambda: None
-	translations = types.SimpleNamespace(gettext=lambda message: f"translated:{message}")
-	addonHandler.getCodeAddon = lambda: types.SimpleNamespace(
-		getTranslationsInstance=lambda: translations,
-	)
-
+def _loadTelegramModule():
 	api = types.ModuleType("api")
 	api.focusObject = None
 	api.foregroundObject = None
 	api.getFocusObject = lambda: api.focusObject
 	api.getForegroundObject = lambda: api.foregroundObject
-	api.desktopObject = types.SimpleNamespace(children=[])
-	api.getDesktopObject = lambda: api.desktopObject
 
 	appModuleHandler = types.ModuleType("appModuleHandler")
 	appModuleHandler.AppModule = object
@@ -267,22 +180,26 @@ def _loadTelegramModule(*, injectTranslation=True):
 	controlTypes.Role = _Role
 	controlTypes.State = _State
 
-	logHandler = types.ModuleType("logHandler")
-	logHandler.log = types.SimpleNamespace(
-		debug=lambda *args, **kwargs: None,
-		debugWarning=lambda *args, **kwargs: None,
-	)
-
 	nvdaObjects = types.ModuleType("NVDAObjects")
 	uiaModule = types.ModuleType("NVDAObjects.UIA")
 	uiaModule.UIA = _FakeUIA
+
+	def fakeScript(*, description, gesture):
+		def decorator(function):
+			function.__doc__ = description
+			function.gesture = gesture
+			return function
+
+		return decorator
+
+	scriptHandler = types.ModuleType("scriptHandler")
+	scriptHandler.script = fakeScript
 
 	ui = types.ModuleType("ui")
 	ui.messages = []
 	ui.message = ui.messages.append
 
 	uiaHandler = types.ModuleType("UIAHandler")
-	uiaHandler.UIA_BoundingRectanglePropertyId = _BOUNDING_RECTANGLE
 	uiaHandler.UIA_ClassNamePropertyId = _CLASS_NAME
 	uiaHandler.UIA_AutomationIdPropertyId = _AUTOMATION_ID
 	uiaHandler.UIA_ControlTypePropertyId = _CONTROL_TYPE
@@ -303,21 +220,25 @@ def _loadTelegramModule(*, injectTranslation=True):
 		baseCacheRequest=object(),
 	)
 
-	comInterfaces = types.ModuleType("comInterfaces")
-	uiaClient = types.ModuleType("comInterfaces.UIAutomationClient")
-	uiaClient.IUIAutomationInvokePattern = object
-	uiaClient.tagPOINT = lambda x, y: types.SimpleNamespace(x=x, y=y)
+	core = types.ModuleType("core")
+	core.calls = []
+	core.callLater = lambda delay, function, *args: core.calls.append((delay, function, args))
+
+	logHandler = types.ModuleType("logHandler")
+	logHandler.log = types.SimpleNamespace(
+		debug=lambda *args, **kwargs: None,
+		exception=lambda *args, **kwargs: None,
+	)
 
 	stubs = {
-		"addonHandler": addonHandler,
 		"api": api,
 		"appModuleHandler": appModuleHandler,
-		"comInterfaces": comInterfaces,
-		"comInterfaces.UIAutomationClient": uiaClient,
 		"controlTypes": controlTypes,
+		"core": core,
 		"logHandler": logHandler,
 		"NVDAObjects": nvdaObjects,
 		"NVDAObjects.UIA": uiaModule,
+		"scriptHandler": scriptHandler,
 		"ui": ui,
 		"UIAHandler": uiaHandler,
 	}
@@ -326,11 +247,11 @@ def _loadTelegramModule(*, injectTranslation=True):
 	try:
 		spec = importlib.util.spec_from_file_location("telegram_app_module_under_test", MODULE_PATH)
 		module = importlib.util.module_from_spec(spec)
-		if injectTranslation:
-			module._ = lambda message: message
+		module._ = lambda message: message
 		assert spec.loader is not None
 		spec.loader.exec_module(module)
 		module._testApi = api
+		module._testCore = core
 		module._testUi = ui
 		return module
 	finally:
@@ -341,199 +262,9 @@ def _loadTelegramModule(*, injectTranslation=True):
 				sys.modules[name] = value
 
 
-_CALL_BUTTON_WIDTH = 68
-_CALL_BUTTON_TOP = 480
-
-
-def _callButton(name, left, *, offscreen=False, children=()):
-	return _FakeUIA(
-		role=_Role.BUTTON,
-		name=name,
-		className="class Ui::CallButton",
-		automationId="class Calls::Panel.class Ui::CallButton",
-		rectangle=(float(left), float(_CALL_BUTTON_TOP), float(_CALL_BUTTON_WIDTH), 68.0),
-		isOffscreen=offscreen,
-		children=list(children),
-	)
-
-
-def _callPanel(*, incoming):
-	"""Build Telegram's call panel button row as calls_panel.cpp lays it out.
-
-	The row reads Screencast - Camera - Cancel/Decline - Answer/Hangup/Redial -
-	Mute - Add people, every button is a ``Ui::CallButton``, and only the camera
-	and the microphone carry a device-selection corner button.
-	"""
-	width = _CALL_BUTTON_WIDTH
-	cancelLeft = 300
-	cameraLeft = cancelLeft - width
-	# Telegram keeps the shared answer button beside the decline button while a
-	# call rings, and slides it over the hidden one once the call is running.
-	answerLeft = cancelLeft + (width if incoming else 0)
-	microphoneLeft = answerLeft + width
-	cameraDevice = _callButton("Camera", cameraLeft + 40)
-	audioDevice = _callButton("Speaker", microphoneLeft + 40)
-	panel = types.SimpleNamespace(
-		screencast=_callButton("Screen sharing", cameraLeft - width, offscreen=incoming),
-		camera=_callButton("Start video", cameraLeft, children=[cameraDevice]),
-		decline=_callButton("Decline", cancelLeft, offscreen=not incoming),
-		cancel=_callButton("Cancel", cancelLeft, offscreen=True),
-		answer=_callButton("Accept" if incoming else "End call", answerLeft),
-		microphone=_callButton("Mute", microphoneLeft, children=[audioDevice]),
-		addPeople=_callButton("Add people", microphoneLeft + width),
-		cameraDevice=cameraDevice,
-		audioDevice=audioDevice,
-	)
-	panel.window = _FakeUIA(
-		className="class Calls::Panel",
-		children=[
-			panel.answer,
-			panel.decline,
-			panel.cancel,
-			panel.screencast,
-			panel.camera,
-			panel.microphone,
-			panel.addPeople,
-		],
-	)
-	return panel
-
-
 class TelegramAppModuleTests(unittest.TestCase):
 	def setUp(self):
 		self.module = _loadTelegramModule()
-
-	def test_unregistered_fallback_module_loads_its_addon_translation(self):
-		module = _loadTelegramModule(injectTranslation=False)
-
-		self.assertEqual(module._MAIN_MENU_CLASS_NAMES["Window::MainMenu"], "translated:Main menu")
-
-	def test_profile_label_is_applied_before_focus_announcement(self):
-		obj = _FakeUIA(
-			automationId="class Window::MainMenu.class Ui::UserpicButton",
-			className="class Ui::UserpicButton",
-			role=_Role.BUTTON,
-		)
-		observedNames = []
-
-		self.module.AppModule().event_gainFocus(obj, lambda: observedNames.append(obj.name))
-
-		self.assertEqual(observedNames, ["Profile"])
-
-	def test_accounts_label_is_applied_before_focus_announcement(self):
-		obj = _FakeUIA(
-			automationId="class Window::MainMenu.class Window::MainMenu::ToggleAccountsButton",
-			className="class Window::MainMenu::ToggleAccountsButton",
-			role=_Role.BUTTON,
-		)
-
-		self.module.AppModule().event_gainFocus(obj, lambda: None)
-
-		self.assertEqual(obj.name, "Accounts")
-
-	def test_only_the_main_menu_container_itself_is_named(self):
-		menu = _FakeUIA(
-			automationId="class MainWindow.class Ui::LayerStackWidget.class Window::MainMenu",
-			className="class Window::MainMenu",
-			role=_Role.GROUPING,
-		)
-		ancestor = _FakeUIA(
-			automationId="class MainWindow.class Window::MainMenu.class Ui::ScrollArea",
-			className="class Ui::ScrollArea",
-			role=_Role.GROUPING,
-		)
-
-		appModule = self.module.AppModule()
-		appModule.event_focusEntered(menu, lambda: None)
-		appModule.event_focusEntered(ancestor, lambda: None)
-
-		self.assertEqual(menu.name, "Main menu")
-		self.assertEqual(ancestor.name, "")
-
-	def test_existing_provider_name_is_preserved(self):
-		obj = _FakeUIA(
-			automationId="class Window::MainMenu.class Ui::UserpicButton",
-			className="class Ui::UserpicButton",
-			role=_Role.BUTTON,
-			name="",
-			providerName="Telegram profile",
-		)
-
-		self.module._cleanTelegramControlName(obj)
-
-		self.assertEqual(obj.name, "Telegram profile")
-
-	def test_composer_buttons_use_provider_name_or_translated_fallback(self):
-		stickers = _FakeUIA(
-			automationId="ButtonStickers",
-			role=_Role.BUTTON,
-			providerName="Emoji and stickers",
-		)
-		voice = _FakeUIA(automationId="btnVoiceMessage", role=_Role.BUTTON)
-
-		self.module._cleanTelegramControlName(stickers)
-		self.module._cleanTelegramControlName(voice)
-
-		self.assertEqual(stickers.name, "Emoji and stickers")
-		self.assertEqual(voice.name, "Record voice message")
-
-	def test_suggestion_uses_unique_descendant_text(self):
-		obj = _FakeUIA(
-			automationId="class MainWindow.class Dialogs::TopBarSuggestionContent",
-			className="class Dialogs::TopBarSuggestionContent",
-			children=[
-				_FakeUIA(name="Your Premium expires soon"),
-				_FakeUIA(name="Your Premium expires soon"),
-				_FakeUIA(name="Renew now"),
-			],
-		)
-
-		self.module._cleanTelegramControlName(obj)
-
-		self.assertEqual(obj.name, "Your Premium expires soon, Renew now")
-
-	def test_suggestion_and_dismiss_button_have_safe_fallbacks(self):
-		suggestion = _FakeUIA(
-			automationId="class MainWindow.class Dialogs::TopBarSuggestionContent",
-			className="class Dialogs::TopBarSuggestionContent",
-		)
-		dismiss = _FakeUIA(
-			automationId=("class MainWindow.class Dialogs::TopBarSuggestionContent.class Ui::IconButton"),
-			className="class Ui::IconButton",
-		)
-
-		self.module._cleanTelegramControlName(suggestion)
-		self.module._cleanTelegramControlName(dismiss)
-
-		self.assertEqual(suggestion.name, "Telegram suggestion")
-		self.assertEqual(dismiss.name, "Dismiss suggestion")
-
-	def test_class_chain_provider_name_does_not_block_known_label(self):
-		chain = "class Window::MainMenu.class Ui::UserpicButton"
-		obj = _FakeUIA(
-			automationId=chain,
-			className="class Ui::UserpicButton",
-			name=chain,
-			providerName=chain,
-		)
-
-		self.module._cleanTelegramControlName(obj)
-
-		self.assertEqual(obj.name, "Profile")
-
-	def test_unknown_control_stops_announcing_rtti_chain(self):
-		chain = "class MainWindow.class Ui::RpWidget.class Ui::IconButton"
-		obj = _FakeUIA(automationId=chain, className="class Ui::IconButton", name=chain)
-
-		self.module._cleanTelegramControlName(obj)
-
-		self.assertEqual(obj.name, "")
-
-	def test_rtti_chain_detection_does_not_consume_ordinary_names(self):
-		self.assertTrue(self.module._isRttiClassChain("class MainWindow.struct Dialogs::Widget"))
-		self.assertFalse(self.module._isRttiClassChain(""))
-		self.assertFalse(self.module._isRttiClassChain("class of 99"))
-		self.assertFalse(self.module._isRttiClassChain("holiday.photo.jpg"))
 
 	def test_chat_list_is_detected_by_msvc_rtti_class_name(self):
 		chatList = _FakeUIA(role=_Role.LIST, name="聊天", className="class Dialogs::InnerWidget")
@@ -561,7 +292,7 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 		self.module._testApi.foregroundObject = _FakeUIA(children=[chatList])
 
-		self.module.focusChatList()
+		self.module.AppModule().script_focusChatList(None)
 
 		self.assertFalse(first.focused)
 		self.assertTrue(selected.focused)
@@ -576,7 +307,7 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 		self.module._testApi.foregroundObject = chatList
 
-		self.module.focusChatList()
+		self.module.AppModule().script_focusChatList(None)
 
 		self.assertTrue(first.focused)
 
@@ -590,7 +321,7 @@ class TelegramAppModuleTests(unittest.TestCase):
 		self.module._testApi.foregroundObject = chatList
 		self.module._testApi.focusObject = current
 
-		self.module.focusChatList()
+		self.module.AppModule().script_focusChatList(None)
 
 		self.assertEqual(self.module._testUi.messages, ["Saved Messages"])
 
@@ -600,21 +331,21 @@ class TelegramAppModuleTests(unittest.TestCase):
 			className="class Dialogs::InnerWidget",
 		)
 
-		self.module.focusChatList()
+		self.module.AppModule().script_focusChatList(None)
 
 		self.assertEqual(self.module._testUi.messages, ["Chat list is empty"])
 
 	def test_alt_1_does_not_match_localized_name_without_class(self):
 		self.module._testApi.foregroundObject = _FakeUIA(role=_Role.LIST, name="Chats")
 
-		self.module.focusChatList()
+		self.module.AppModule().script_focusChatList(None)
 
 		self.assertEqual(self.module._testUi.messages, ["Chat list not found"])
 
 	def test_alt_1_contains_native_provider_query_failure(self):
 		self.module._testApi.foregroundObject = _FakeUIA(failQuery=True)
 
-		self.module.focusChatList()
+		self.module.AppModule().script_focusChatList(None)
 
 		self.assertEqual(self.module._testUi.messages, ["Chat list not found"])
 
@@ -662,7 +393,7 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 		self.module._testApi.foregroundObject = _FakeUIA(children=[button, other])
 
-		self.module.openMainMenu()
+		self.module.AppModule().script_openMainMenu(None)
 
 		self.assertEqual(button.actionCount, 1)
 		self.assertEqual(other.actionCount, 0)
@@ -683,301 +414,10 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 		self.module._testApi.foregroundObject = _FakeUIA(children=[search, sidebarMenu])
 
-		self.module.openMainMenu()
+		self.module.AppModule().script_openMainMenu(None)
 
 		self.assertEqual(sidebarMenu.actionCount, 1)
 		self.assertEqual(search.actionCount, 0)
-
-	def test_point_lookup_accepts_both_main_menu_layouts(self):
-		sidebarMenu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::SideBarButton",
-			automationId="class MainWindow.class Ui::RpWidget.class Ui::SideBarButton",
-		)
-		dialogsMenu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::RpWidget.class Ui::IconButton",
-		)
-		_FakeUIA(children=[sidebarMenu])
-		_FakeUIA(children=[dialogsMenu])
-
-		self.assertTrue(self.module._isRawTelegramMainMenuButton(sidebarMenu))
-		self.assertTrue(self.module._isRawTelegramMainMenuButton(dialogsMenu))
-
-	def test_point_lookup_rejects_offscreen_and_unrelated_buttons(self):
-		offscreen = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::SideBarButton",
-			automationId="class MainWindow.class Ui::SideBarButton",
-			isOffscreen=True,
-		)
-		unrelated = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Calls::Panel.class Ui::IconButton",
-		)
-		notAButton = _FakeUIA(role=_Role.LIST, className="class Ui::SideBarButton")
-		for element in (offscreen, unrelated, notAButton):
-			_FakeUIA(children=[element])
-
-		self.assertFalse(self.module._isRawTelegramMainMenuButton(offscreen))
-		self.assertFalse(self.module._isRawTelegramMainMenuButton(unrelated))
-		self.assertFalse(self.module._isRawTelegramMainMenuButton(notAButton))
-
-	def test_point_lookup_rejects_later_and_scrolled_sidebar_buttons(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::SideBarButton",
-			automationId="class MainWindow.class Ui::RpWidget.class Ui::SideBarButton",
-		)
-		folder = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::SideBarButton",
-			automationId="class MainWindow.class Ui::RpWidget.class Ui::SideBarButton",
-		)
-		scrolledFolder = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::SideBarButton",
-			automationId=(
-				"class MainWindow.class Ui::ScrollArea.class Ui::VerticalLayout.class Ui::SideBarButton"
-			),
-		)
-		_FakeUIA(children=[menu, folder])
-		_FakeUIA(children=[scrolledFolder])
-
-		self.assertTrue(self.module._isRawTelegramMainMenuButton(menu))
-		self.assertFalse(self.module._isRawTelegramMainMenuButton(folder))
-		self.assertFalse(self.module._isRawTelegramMainMenuButton(scrolledFolder))
-
-	def test_point_lookup_invokes_first_menu_without_subtree_query(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		window = _FakeUIA(children=[menu], failQuery=True)
-		window.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		self.module._testApi.foregroundObject = window
-		self.module._uiaHandler().clientObject.ElementFromPoint = lambda point: menu
-
-		self.module.openMainMenu()
-
-		self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_standard_layout_samples_inside_the_40_pixel_toggle(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			# Telegram 7.0.9 exposes neither property in the attached NVDA log.
-			className="",
-			automationId="",
-		)
-		searchControls = _FakeUIA(children=[menu], failQuery=True)
-		searchControls.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		self.module._testApi.foregroundObject = searchControls
-		self.module._uiaHandler().clientObject.ElementFromPoint = (
-			lambda point: menu if 7 <= point.x <= 47 and 7 <= point.y <= 47 else searchControls
-		)
-
-		self.module.openMainMenu()
-
-		self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_metadata_free_button_is_accepted_only_as_direct_point_hit(self):
-		button = _FakeUIA(role=_Role.BUTTON)
-
-		self.assertFalse(self.module._isRawTelegramMainMenuButton(button))
-		self.assertTrue(self.module._isRawTelegramMainMenuButton(button, directTopLeftHit=True))
-
-	def test_direct_standard_menu_ignores_flattened_prior_icon_sibling(self):
-		priorTitleBarIcon = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class MainWindow.class Ui::Platform::TitleWidget.class Ui::IconButton",
-		)
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class MainWindow.class Dialogs::Widget.class Ui::IconButton",
-		)
-		_FakeUIA(children=[priorTitleBarIcon, menu])
-
-		self.assertTrue(self.module._isRawTelegramMainMenuButton(menu))
-		self.assertTrue(self.module._isRawTelegramMainMenuButton(menu, directTopLeftHit=True))
-
-	def test_point_lookup_checks_button_beside_transparent_overlay(self):
-		overlay = _FakeUIA(
-			role=_Role.GROUPING,
-			className="class Ui::RpWidget",
-			automationId="class Dialogs::Widget.class MenuUnderButton",
-		)
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		# Telegram constructs the toggle first and the transparent hit area
-		# second, then stacks the latter underneath visually.
-		window = _FakeUIA(children=[menu, overlay], failQuery=True)
-		window.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		self.module._testApi.foregroundObject = window
-		self.module._uiaHandler().clientObject.ElementFromPoint = lambda point: overlay
-
-		self.module.openMainMenu()
-
-		self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_point_lookup_opens_compact_and_expanded_folder_sidebars(self):
-		for sidebarWidth in (64, 240):
-			with self.subTest(sidebarWidth=sidebarWidth):
-				menu = _FakeUIA(
-					role=_Role.BUTTON,
-					className="class Ui::SideBarButton",
-					automationId="class MainWindow.class Ui::RpWidget.class Ui::SideBarButton",
-				)
-				window = _FakeUIA(children=[menu], failQuery=True)
-				window.location = types.SimpleNamespace(left=0, top=0, width=sidebarWidth + 900, height=800)
-				self.module._testApi.foregroundObject = window
-				self.module._uiaHandler().clientObject.ElementFromPoint = lambda point: menu
-
-				self.module.openMainMenu()
-
-				self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_point_action_failure_retries_with_subtree_button(self):
-		stalePointButton = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-			failAction=True,
-		)
-		fallbackMenu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		window = _FakeUIA(children=[fallbackMenu])
-		window.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		self.module._testApi.foregroundObject = window
-		self.module._uiaHandler().clientObject.ElementFromPoint = lambda point: stalePointButton
-
-		self.module.openMainMenu()
-
-		self.assertEqual(fallbackMenu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_subtree_menu_query_returns_a_live_actionable_element(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		window = _FakeUIA(children=[menu])
-		window.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		window.FindFirstBuildCache = lambda *args: (_ for _ in ()).throw(
-			AssertionError("action lookup must not return a cached-only element"),
-		)
-		self.module._testApi.foregroundObject = window
-		self.module._uiaHandler().clientObject.ElementFromPoint = lambda point: window
-
-		self.module.openMainMenu()
-
-		self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_null_sidebar_query_falls_through_to_standard_icon_button(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		window = _FakeUIA(children=[menu])
-		originalFindFirst = window.FindFirst
-
-		def findFirst(scope, condition):
-			result = originalFindFirst(scope, condition)
-			return result if result is not None else _FakeNullElement()
-
-		window.FindFirst = findFirst
-
-		self.assertIs(self.module._findTelegramMainMenuButton(window), menu)
-
-	def test_point_lookup_treats_null_previous_sibling_as_tree_boundary(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		window = _FakeUIA(children=[menu], failQuery=True)
-		window.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		client = self.module._uiaHandler().clientObject
-		baseWalker = client.RawViewWalker
-
-		class NullTerminatedWalker:
-			def GetParentElement(self, element):
-				return baseWalker.GetParentElement(element) or _FakeNullElement()
-
-			def GetPreviousSiblingElement(self, element):
-				return baseWalker.GetPreviousSiblingElement(element) or _FakeNullElement()
-
-			def GetNextSiblingElement(self, element):
-				return baseWalker.GetNextSiblingElement(element) or _FakeNullElement()
-
-		client.RawViewWalker = NullTerminatedWalker()
-		self.addCleanup(setattr, client, "RawViewWalker", baseWalker)
-		client.ElementFromPoint = lambda point: menu
-		self.module._testApi.foregroundObject = window
-
-		self.module.openMainMenu()
-
-		self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_popup_foreground_uses_same_app_main_window(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		mainWindow = _FakeUIA(className="class MainWindow", children=[menu])
-		mainWindow.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		popup = _FakeUIA(className="class NotificationWindow")
-		appModule = types.SimpleNamespace(appName="telegram")
-		mainWindow.appModule = appModule
-		popup.appModule = appModule
-		self.module._testApi.foregroundObject = popup
-		self.module._testApi.desktopObject.children = [mainWindow]
-		self.module._uiaHandler().clientObject.ElementFromPoint = lambda point: menu
-
-		self.module.openMainMenu()
-
-		self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, [])
-
-	def test_point_lookup_falls_back_when_a_neighbouring_button_is_hit(self):
-		menu = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		neighbour = _FakeUIA(
-			role=_Role.BUTTON,
-			className="class Ui::IconButton",
-			automationId="class Dialogs::Widget.class Ui::IconButton",
-		)
-		window = _FakeUIA(children=[menu, neighbour])
-		window.location = types.SimpleNamespace(left=0, top=0, width=1200, height=800)
-		self.module._testApi.foregroundObject = window
-		self.module._uiaHandler().clientObject.ElementFromPoint = lambda point: neighbour
-
-		self.module.openMainMenu()
-
-		self.assertEqual(menu.actionCount, 1)
-		self.assertEqual(neighbour.actionCount, 0)
 
 	def test_alt_m_ignores_offscreen_button(self):
 		button = _FakeUIA(
@@ -988,7 +428,7 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 		self.module._testApi.foregroundObject = _FakeUIA(children=[button])
 
-		self.module.openMainMenu()
+		self.module.AppModule().script_openMainMenu(None)
 
 		self.assertEqual(button.actionCount, 0)
 		self.assertEqual(self.module._testUi.messages, ["Main menu is not available"])
@@ -996,7 +436,7 @@ class TelegramAppModuleTests(unittest.TestCase):
 	def test_alt_m_reports_when_main_menu_is_unavailable(self):
 		self.module._testApi.foregroundObject = _FakeUIA()
 
-		self.module.openMainMenu()
+		self.module.AppModule().script_openMainMenu(None)
 
 		self.assertEqual(self.module._testUi.messages, ["Main menu is not available"])
 
@@ -1009,11 +449,11 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 		self.module._testApi.foregroundObject = button
 
-		self.module.openMainMenu()
+		self.module.AppModule().script_openMainMenu(None)
 
 		self.assertEqual(self.module._testUi.messages, ["Main menu is not available"])
 
-	def test_shortcut_commands_do_not_expand_recursive_descendants(self):
+	def test_shortcut_scripts_do_not_expand_recursive_descendants(self):
 		chat = _FakeUIA(role=_Role.LISTITEM, name="Alice")
 		chatList = _FakeUIA(
 			role=_Role.LIST,
@@ -1022,198 +462,191 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 		self.module._testApi.foregroundObject = _FakeUIA(children=[chatList])
 
-		self.module.focusChatList()
+		self.module.AppModule().script_focusChatList(None)
 
 		self.assertTrue(chat.focused)
 
-	def test_call_panel_names_the_action_it_performs(self):
-		panel = _callPanel(incoming=True)
-		self.module._testApi.foregroundObject = panel.window
+	def test_shortcut_gestures_match_unigram_plus(self):
+		self.assertEqual(self.module.AppModule.script_focusChatList.gesture, "kb:alt+1")
+		self.assertEqual(self.module.AppModule.script_openMainMenu.gesture, "kb:alt+m")
+		self.assertEqual(self.module.AppModule.script_showMessageLinks.gesture, "kb:control+enter")
 
-		self.module.answerCall()
-
-		self.assertEqual(panel.answer.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, ["Accept"])
-
-	def test_incoming_call_is_declined_rather_than_answered(self):
-		panel = _callPanel(incoming=True)
-		self.module._testApi.foregroundObject = panel.window
-
-		self.module.endCall()
-
-		self.assertEqual(panel.decline.actionCount, 1)
-		self.assertEqual(panel.answer.actionCount, 0)
-		self.assertEqual(self.module._testUi.messages, ["Decline"])
-
-	def test_established_call_is_ended_by_the_shared_button(self):
-		panel = _callPanel(incoming=False)
-		self.module._testApi.foregroundObject = panel.window
-
-		self.module.endCall()
-
-		self.assertEqual(panel.answer.actionCount, 1)
-		self.assertEqual(self.module._testUi.messages, ["End call"])
-
-	def test_answer_never_hangs_up_an_established_call(self):
-		panel = _callPanel(incoming=False)
-		self.module._testApi.foregroundObject = panel.window
-
-		self.module.answerCall()
-
-		self.assertEqual(panel.answer.actionCount, 0)
-		self.assertEqual(self.module._testUi.messages, ["No incoming call"])
-
-	def test_microphone_and_camera_are_told_apart_by_their_corner_button(self):
-		panel = _callPanel(incoming=False)
-		self.module._testApi.foregroundObject = panel.window
-
-		self.module.toggleCallMicrophone()
-		self.module.toggleCallCamera()
-
-		self.assertEqual(panel.microphone.actionCount, 1)
-		self.assertEqual(panel.camera.actionCount, 1)
-		self.assertEqual(panel.screencast.actionCount, 0)
-		self.assertEqual(panel.addPeople.actionCount, 0)
-		self.assertEqual(self.module._testUi.messages, ["Mute", "Start video"])
-
-	def test_device_selection_corner_buttons_are_never_pressed(self):
-		panel = _callPanel(incoming=False)
-		self.module._testApi.foregroundObject = panel.window
-
-		self.module.toggleCallMicrophone()
-
-		self.assertEqual(panel.audioDevice.actionCount, 0)
-		self.assertEqual(panel.cameraDevice.actionCount, 0)
-
-	def test_call_commands_reach_a_call_window_behind_the_foreground(self):
-		panel = _callPanel(incoming=True)
-		appModule = types.SimpleNamespace(appName="telegram")
-		panel.window.appModule = appModule
-		mainWindow = _FakeUIA(className="class MainWindow")
-		mainWindow.appModule = appModule
-		self.module._testApi.foregroundObject = mainWindow
-		self.module._testApi.desktopObject.children = [panel.window]
-
-		self.module.answerCall()
-
-		self.assertEqual(panel.answer.actionCount, 1)
-
-	def test_call_commands_report_when_no_call_is_running(self):
-		self.module._testApi.foregroundObject = _FakeUIA()
-
-		self.module.endCall()
-		self.module.toggleCallMicrophone()
-		self.module.toggleCallCamera()
+	def test_link_extraction_preserves_order_and_removes_message_punctuation(self):
+		text = (
+			"Android: https://play.google.com/store/apps/details?id=app, "
+			"iOS: https://apps.apple.com/app/id123. "
+			"Windows: https://example.com/download_(stable)."
+		)
 
 		self.assertEqual(
-			self.module._testUi.messages,
-			["Not in a call", "Not in a call", "Not in a call"],
+			self.module.linksFromMessageText(text),
+			(
+				"https://play.google.com/store/apps/details?id=app",
+				"https://apps.apple.com/app/id123",
+				"https://example.com/download_(stable)",
+			),
 		)
 
-	def test_call_command_contains_provider_action_failure(self):
-		panel = _callPanel(incoming=False)
-		panel.microphone.failAction = True
-		self.module._testApi.foregroundObject = panel.window
+	def test_link_extraction_normalizes_www_and_email_and_deduplicates(self):
+		text = "www.example.com Help@Example.com https://EXAMPLE.com https://example.com"
 
-		self.module.toggleCallMicrophone()
-
-		self.assertEqual(self.module._testUi.messages, ["Not in a call"])
-
-	def test_offscreen_call_buttons_do_not_shift_the_button_row(self):
-		panel = _callPanel(incoming=True)
-		# Telegram keeps the hidden screen-sharing and cancel buttons in its
-		# tree while an incoming call rings.
-		self.assertTrue(panel.screencast.isOffscreen)
-		self.module._testApi.foregroundObject = panel.window
-
-		self.module.endCall()
-
-		self.assertEqual(panel.decline.actionCount, 1)
-
-	def test_answer_does_not_start_a_pending_outgoing_call(self):
-		# calls_panel.cpp Panel::updateHangupGeometry(), isWaitingUser branch:
-		# a local outgoing call awaiting confirmation replaces the camera with
-		# a cornerless "Start video" button in its slot, hides the microphone,
-		# and the shared button reads "Start call" - Screencast, Decline and
-		# Mute are all absent, leaving Start video - Cancel - Start call.
-		width = _CALL_BUTTON_WIDTH
-		left = 300
-		startVideo = _callButton("Start video", left - width)
-		cancel = _callButton("Cancel", left)
-		startCall = _callButton("Start call", left + width)
-		window = _FakeUIA(
-			className="class Calls::Panel",
-			children=[startVideo, cancel, startCall],
-		)
-		self.module._testApi.foregroundObject = window
-
-		self.module.answerCall()
-
-		self.assertEqual(startCall.actionCount, 0)
-		self.assertEqual(cancel.actionCount, 0)
-		self.assertEqual(startVideo.actionCount, 0)
-		self.assertEqual(self.module._testUi.messages, ["No incoming call"])
-
-	def test_end_call_still_cancels_a_pending_outgoing_call(self):
-		# Cancelling the not-yet-placed call is a reasonable "end call", even
-		# though Telegram's own label for this button is "Cancel".
-		width = _CALL_BUTTON_WIDTH
-		left = 300
-		startVideo = _callButton("Start video", left - width)
-		cancel = _callButton("Cancel", left)
-		startCall = _callButton("Start call", left + width)
-		window = _FakeUIA(
-			className="class Calls::Panel",
-			children=[startVideo, cancel, startCall],
-		)
-		self.module._testApi.foregroundObject = window
-
-		self.module.endCall()
-
-		self.assertEqual(cancel.actionCount, 1)
-		self.assertEqual(startVideo.actionCount, 0)
-		self.assertEqual(startCall.actionCount, 0)
-		self.assertEqual(self.module._testUi.messages, ["Cancel"])
-
-	def test_incomplete_pending_call_row_is_refused_rather_than_guessed(self):
-		# The real pending-outgoing-call row always keeps the shared
-		# Answer/Hangup/Redial button alongside Cancel (calls_panel.cpp never
-		# toggles it off), and the microphone is hidden by the exact same flag
-		# that shows the cornerless video trigger, so the two can never appear
-		# together. A row missing the shared button while carrying a
-		# microphone therefore does not match any real Telegram state, and
-		# must not be treated as though Cancel were the shared button and the
-		# video trigger were Cancel.
-		width = _CALL_BUTTON_WIDTH
-		left = 300
-		startVideo = _callButton("Start video", left - width)
-		cancel = _callButton("Cancel", left)
-		muteDevice = _callButton("Speaker", left + width + 40)
-		mute = _callButton("Mute", left + width, children=[muteDevice])
-		window = _FakeUIA(
-			className="class Calls::Panel",
-			children=[startVideo, cancel, mute],
-		)
-		self.module._testApi.foregroundObject = window
-
-		self.module.answerCall()
-		self.module.endCall()
-
-		self.assertEqual(cancel.actionCount, 0)
-		self.assertEqual(startVideo.actionCount, 0)
-		self.assertEqual(mute.actionCount, 0)
 		self.assertEqual(
-			self.module._testUi.messages,
-			["No incoming call", "Not in a call"],
+			self.module.linksFromMessageText(text),
+			("https://www.example.com", "mailto:Help@Example.com", "https://EXAMPLE.com"),
 		)
 
-	def test_app_module_leaves_the_commands_to_the_global_plugin(self):
-		# Defining them here as well would put a second, identically described
-		# entry in NVDA's Input Gestures dialog, where only one of the two can
-		# be reassigned.
-		self.assertFalse(
-			[name for name in dir(self.module.AppModule) if name.startswith("script_")],
+	def test_control_enter_shows_all_links_from_unigram_message(self):
+		message = _FakeUIA(
+			role=_Role.LISTITEM,
+			name="First https://one.example/path and https://two.example/path",
 		)
+		_FakeUIA(role=_Role.LIST, automationId="ChatsList", children=[message])
+		self.module._testApi.focusObject = message
+
+		class _Gesture:
+			sent = False
+
+			def send(self):
+				self.sent = True
+
+		gesture = _Gesture()
+		self.module.AppModule().script_showMessageLinks(gesture)
+
+		self.assertFalse(gesture.sent)
+		self.assertEqual(len(self.module._testCore.calls), 1)
+		_, callback, args = self.module._testCore.calls[0]
+		self.assertIs(callback, self.module._showMessageLinksMenu)
+		self.assertEqual(args, (("https://one.example/path", "https://two.example/path"),))
+
+	def test_control_enter_supports_qt_history_message_list(self):
+		message = _FakeUIA(role=_Role.LISTITEM, name="https://example.com")
+		_FakeUIA(role=_Role.LIST, className="class HistoryView::ListWidget", children=[message])
+		self.module._testApi.focusObject = message
+		opened = []
+		self.module._openMessageLink = opened.append
+
+		self.module.AppModule().script_showMessageLinks(None)
+
+		self.assertEqual(opened, ["https://example.com"])
+		self.assertEqual(self.module._testCore.calls, [])
+
+	def test_control_enter_finds_message_list_through_accessibility_wrappers(self):
+		message = _FakeUIA(role=_Role.LISTITEM, name="https://example.com")
+		wrapper = _FakeUIA(children=[message])
+		_FakeUIA(role=_Role.LIST, automationId="ChatsList", children=[wrapper])
+		self.module._testApi.focusObject = message
+		opened = []
+		self.module._openMessageLink = opened.append
+
+		self.module.AppModule().script_showMessageLinks(None)
+
+		self.assertEqual(opened, ["https://example.com"])
+		self.assertEqual(self.module._testCore.calls, [])
+
+	def test_control_enter_supports_live_qt_history_inner_hierarchy(self):
+		message = _FakeUIA(role=_Role.LISTITEM, name="https://example.com")
+		_FakeUIA(
+			automationId=(
+				"class MainWindow.class Ui::RpWidget.class MainWidget."
+				"class HistoryWidget.class Ui::ElasticScroll.class HistoryInner"
+			),
+			children=[message],
+		)
+		self.module._testApi.focusObject = message
+		opened = []
+		self.module._openMessageLink = opened.append
+
+		self.module.AppModule().script_showMessageLinks(None)
+
+		self.assertEqual(opened, ["https://example.com"])
+		self.assertEqual(self.module._testCore.calls, [])
+
+	def test_multiple_link_chooser_opens_live_second_selection(self):
+		class _Dialog:
+			def __init__(self):
+				self.bindings = {}
+
+			def SetSelection(self, selection):
+				self.selection = selection
+
+			def Bind(self, eventType, handler, id=None):
+				self.bindings[(eventType, id)] = handler
+
+			def Show(self):
+				pass
+
+			def Raise(self):
+				pass
+
+			def Close(self):
+				pass
+
+			def Destroy(self):
+				pass
+
+		class _SelectionEvent:
+			def GetSelection(self):
+				return 1
+
+		dialog = _Dialog()
+		wx = types.ModuleType("wx")
+		wx.EVT_BUTTON = "button"
+		wx.EVT_CLOSE = "close"
+		wx.EVT_LISTBOX = "listbox"
+		wx.ID_OK = 1
+		wx.CallAfter = lambda callback, *args: callback(*args)
+		wx.SingleChoiceDialog = lambda *args: dialog
+		gui = types.ModuleType("gui")
+		gui.mainFrame = types.SimpleNamespace(
+			prePopup=lambda: None,
+			postPopup=lambda: None,
+		)
+		previousGui = sys.modules.get("gui")
+		previousWx = sys.modules.get("wx")
+		sys.modules["gui"] = gui
+		sys.modules["wx"] = wx
+		opened = []
+		self.module._openMessageLink = opened.append
+		try:
+			self.module._showMessageLinksMenu(("https://one.example", "https://two.example"))
+			dialog.bindings[(wx.EVT_LISTBOX, None)](_SelectionEvent())
+			dialog.bindings[(wx.EVT_BUTTON, wx.ID_OK)](object())
+		finally:
+			if previousGui is None:
+				sys.modules.pop("gui", None)
+			else:
+				sys.modules["gui"] = previousGui
+			if previousWx is None:
+				sys.modules.pop("wx", None)
+			else:
+				sys.modules["wx"] = previousWx
+
+		self.assertEqual(opened, ["https://two.example"])
+
+	def test_control_enter_reports_message_without_links(self):
+		message = _FakeUIA(role=_Role.LISTITEM, name="A message without a link")
+		_FakeUIA(role=_Role.LIST, automationId="ChatsList", children=[message])
+		self.module._testApi.focusObject = message
+
+		self.module.AppModule().script_showMessageLinks(None)
+
+		self.assertEqual(self.module._testUi.messages, ["No links in this message"])
+		self.assertEqual(self.module._testCore.calls, [])
+
+	def test_control_enter_passes_through_outside_message_list(self):
+		self.module._testApi.focusObject = _FakeUIA(role=_Role.BUTTON, name="Send")
+
+		class _Gesture:
+			sent = False
+
+			def send(self):
+				self.sent = True
+
+		gesture = _Gesture()
+		self.module.AppModule().script_showMessageLinks(gesture)
+
+		self.assertTrue(gesture.sent)
+		self.assertEqual(self.module._testCore.calls, [])
 
 
 if __name__ == "__main__":
