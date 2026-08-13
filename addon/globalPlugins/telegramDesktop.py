@@ -3,209 +3,195 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING.txt for more details.
 
-"""This add-on's user-assignable Telegram commands.
-
-The commands live in a global plug-in rather than in the app module for two
-reasons. NVDA offers an app module's commands in the Input Gestures dialog only
-when the dialog was opened from that application, and it drops them entirely
-when UnigramPlus or another add-on wins the shared ``appModules/telegram.py``
-lookup. A global plug-in is always running, so NVDA always lists these commands
-and the user can always reassign them.
-"""
+"""Keep this add-on's commands available when another add-on claims Telegram."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 import importlib
-import ntpath
 from types import ModuleType
-from typing import TYPE_CHECKING, cast
 
 import addonHandler
 import api
+import controlTypes
 import globalPluginHandler
-from logHandler import log
 from scriptHandler import script
-
-
-if TYPE_CHECKING:
-	import inputCore
+import UIAHandler
 
 
 addonHandler.initTranslation()
 
 _TELEGRAM_APP_NAME = "telegram"
-_TELEGRAM_PRODUCT_NAME = "telegram desktop"
-_TELEGRAM_EXECUTABLE_NAME = "telegram.exe"
-_UNIGRAM_IDENTIFIER = "unigram"
+_TELEGRAM_GESTURES = {
+	"kb:alt+1": "focusChatList",
+	"kb:alt+m": "openMainMenu",
+	"kb:control+enter": "showMessageLinks",
+	"kb:control+tab": "switchChat",
+	"kb:control+shift+tab": "switchChat",
+}
+_MAIN_MENU_CLASS_NAMES = {
+	"Window::MainMenu": _("Main menu"),
+	"Ui::UserpicButton": _("Profile"),
+	"Window::MainMenu::ToggleAccountsButton": _("Accounts"),
+}
+_COMPOSER_AUTOMATION_ID_NAMES = {
+	"ButtonStickers": _("Emoji, stickers, and GIFs"),
+	"btnVoiceMessage": _("Record voice message"),
+}
+_TOP_BAR_SUGGESTION_CLASS_NAME = "Dialogs::TopBarSuggestionContent"
 
-_codeAddon: addonHandler.Addon = addonHandler.getCodeAddon()
-
-# Resolve this add-on's module by its qualified owner, bypassing the shared
-# appModules/telegram.py lookup that UnigramPlus or another add-on may win.
-_telegramModule: ModuleType = _codeAddon.loadModule("appModules.telegram")
+# Loading through the owning add-on gives this module a qualified name and
+# bypasses the shared appModules search path. That matters when UnigramPlus or
+# another add-on also provides appModules/telegram.py.
+_telegramModule: ModuleType = addonHandler.getCodeAddon().loadModule("appModules.telegram")
+# NVDA reloads global plug-ins without necessarily evicting add-on-owned app
+# modules from sys.modules. Refresh this module so newly added or changed
+# shortcut helpers are available immediately after Tools -> Reload Add-ons.
 _telegramModule = importlib.reload(_telegramModule)
-
-#: The Input Gestures category these commands are grouped under.
-ADDON_SUMMARY: str = cast(str, _codeAddon.manifest["summary"])
-
-
-def _normalizedAppModuleAttribute(appModule: object, name: str) -> str:
-	"""Return a case-insensitive app-module attribute, or an empty value."""
-	try:
-		return str(getattr(appModule, name, "") or "").casefold()
-	except Exception:
-		return ""
 
 
 def _isTelegramObject(obj: object) -> bool:
-	"""Return whether *obj* belongs to the official Telegram Desktop process.
-
-	Unigram also registers as ``telegram`` with NVDA.  Do not let that shared
-	app name alone grant this global plug-in ownership of its gestures or UIA
-	objects: Telegram Desktop's PE metadata identifies the product and its
-	executable independently, without traversing the UIA tree.
-	"""
 	try:
-		appModule = obj.appModule
+		return obj.appModule.appName.casefold() == _TELEGRAM_APP_NAME
 	except Exception:
 		return False
 
-	if _normalizedAppModuleAttribute(appModule, "appName") != _TELEGRAM_APP_NAME:
-		return False
 
-	productName = _normalizedAppModuleAttribute(appModule, "productName")
-	appPath = _normalizedAppModuleAttribute(appModule, "appPath")
-	if _UNIGRAM_IDENTIFIER in productName or _UNIGRAM_IDENTIFIER in appPath:
-		return False
+def _normalizedClassName(obj: object) -> str:
+	try:
+		className = obj.UIAClassName.strip()
+	except Exception:
+		return ""
+	return className.removeprefix("class ").removeprefix("struct ")
 
-	return (
-		productName == _TELEGRAM_PRODUCT_NAME
-		and ntpath.basename(appPath) == _TELEGRAM_EXECUTABLE_NAME
+
+def _automationIdClassNames(automationId: str) -> tuple[str, ...]:
+	"""Return Telegram's RTTI class components from a UIA AutomationId."""
+	return tuple(
+		component.removeprefix("class ").removeprefix("struct ") for component in automationId.split(".")
 	)
 
 
-def _foregroundObject() -> object | None:
+def _setObjectName(obj: object, name: str) -> None:
 	try:
-		return api.getForegroundObject()
+		obj.name = name
 	except Exception:
-		return None
+		pass
 
 
-def _telegramIsInForeground() -> bool:
-	"""Return whether Telegram owns the foreground, failing closed if unreadable."""
-	return _isTelegramObject(_foregroundObject())
-
-
-def _passGestureToApplication(gesture: "inputCore.InputGesture") -> None:
-	"""Let the focused application receive a gesture this add-on will not act on.
-
-	These commands are bound globally so that NVDA can list them in the Input
-	Gestures dialog at any time. Outside Telegram they must therefore behave as
-	if the add-on had never claimed the keystroke.
-	"""
+def _cleanTelegramControlName(obj: object) -> None:
+	"""Supply useful names for known Telegram controls before speech."""
+	if not _isTelegramObject(obj):
+		return
 	try:
-		gesture.send()
+		automationId = obj.UIAAutomationId
 	except Exception:
-		# Only keyboard gestures can be sent on to the application.
-		log.debugWarning("Telegram command could not pass its gesture through", exc_info=True)
+		return
+	try:
+		rawName = obj.UIAElement.GetCurrentPropertyValue(UIAHandler.UIA_NamePropertyId)
+	except Exception:
+		try:
+			rawName = obj.UIAElement.CurrentName
+		except Exception:
+			rawName = ""
+	composerFallback = (
+		_COMPOSER_AUTOMATION_ID_NAMES.get(automationId) if isinstance(automationId, str) else None
+	)
+	if composerFallback is not None:
+		# Prefer Telegram's provider name because the voice-message control can
+		# change modes. Some NVDA object overlays fail to expose that name even
+		# though the underlying UIA element still has it.
+		_setObjectName(obj, rawName if isinstance(rawName, str) and rawName else composerFallback)
+		return
+	if isinstance(automationId, str):
+		automationClasses = _automationIdClassNames(automationId)
+		if _TOP_BAR_SUGGESTION_CLASS_NAME in automationClasses:
+			fallback = (
+				_("Telegram suggestion")
+				if _normalizedClassName(obj) == _TOP_BAR_SUGGESTION_CLASS_NAME
+				else _("Dismiss suggestion")
+			)
+			_setObjectName(obj, rawName if isinstance(rawName, str) and rawName else fallback)
+			return
+	if rawName or not isinstance(automationId, str) or "Window::MainMenu" not in automationId:
+		return
+
+	automationClasses = _automationIdClassNames(automationId)
+	name = next(
+		(
+			_MAIN_MENU_CLASS_NAMES[className]
+			for className in reversed(automationClasses)
+			if className in _MAIN_MENU_CLASS_NAMES
+		),
+		None,
+	)
+	if name is None:
+		name = _MAIN_MENU_CLASS_NAMES.get(_normalizedClassName(obj))
+	if name is None:
+		try:
+			role = obj.role
+		except Exception:
+			role = None
+		name = _("Menu item") if role == controlTypes.Role.BUTTON else _("Main menu")
+	_setObjectName(obj, name)
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
-	"""Own this add-on's commands so NVDA can reassign them at any time."""
+	"""Bind Telegram commands only while Telegram is the foreground app."""
 
-	scriptCategory = ADDON_SUMMARY
+	def __init__(self) -> None:
+		super().__init__()
+		self._telegramGesturesAreBound = False
+		try:
+			foreground = api.getForegroundObject()
+		except Exception:
+			foreground = None
+		self._updateGestureBindings(foreground)
 
-	def getScript(self, gesture: "inputCore.InputGesture") -> object | None:
-		"""Only claim built-in gestures while Telegram Desktop is foreground.
+	def _updateGestureBindings(self, obj: object) -> None:
+		shouldBind = _isTelegramObject(obj)
+		if shouldBind == self._telegramGesturesAreBound:
+			return
+		if shouldBind:
+			self.bindGestures(_TELEGRAM_GESTURES)
+		else:
+			for gesture in _TELEGRAM_GESTURES:
+				try:
+					self.removeGestureBinding(gesture)
+				except LookupError:
+					pass
+		self._telegramGesturesAreBound = shouldBind
 
-		Calling ``gesture.send()`` after this plug-in has won lookup only forwards
-		the key to Windows; it does not restart NVDA's script lookup for an app
-		module such as UnigramPlus.  Returning ``None`` here lets NVDA continue to
-		that app module naturally.  The checks inside each command remain needed
-		for user gesture-map assignments, which NVDA resolves before this method.
-		"""
-		if not _telegramIsInForeground():
-			return None
-		return super().getScript(gesture)
-
-	def _cleanControlName(self, obj: object) -> None:
-		if _isTelegramObject(obj):
-			_telegramModule._cleanTelegramControlName(obj)
+	def event_foreground(self, obj: object, nextHandler: Callable[[], None]) -> None:
+		self._updateGestureBindings(obj)
+		nextHandler()
 
 	def event_gainFocus(self, obj: object, nextHandler: Callable[[], None]) -> None:
-		self._cleanControlName(obj)
+		# This also covers an already-open Telegram window after global plug-ins
+		# are reloaded, and guards against a missed foreground event.
+		self._updateGestureBindings(obj)
+		# Labels must be in place before NVDA's focus handler builds speech.
+		_cleanTelegramControlName(obj)
 		nextHandler()
 
 	def event_focusEntered(self, obj: object, nextHandler: Callable[[], None]) -> None:
-		self._cleanControlName(obj)
+		# Menu containers are announced as focus ancestors rather than direct
+		# focus targets, so label them on focusEntered as well.
+		_cleanTelegramControlName(obj)
 		nextHandler()
 
-	@script(
-		# Translators: The description of a command to move focus to Telegram's chat list.
-		description=_("Move focus to chat list"),
-		gesture="kb:alt+1",
-	)
-	def script_focusChatList(self, gesture: "inputCore.InputGesture") -> None:
-		# NVDA resolves a user-assigned gesture from its own gesture map, which
-		# ignores per-instance bindings. The foreground test therefore belongs
-		# here, so a reassigned command still cannot act outside Telegram.
-		if not _telegramIsInForeground():
-			_passGestureToApplication(gesture)
-			return
+	@script(description=_("Move focus to chat list"))
+	def script_focusChatList(self, gesture: object) -> None:
 		_telegramModule.focusChatList()
 
-	@script(
-		# Translators: The description of a command to open Telegram's main menu.
-		description=_("Open main menu"),
-		gesture="kb:alt+m",
-	)
-	def script_openMainMenu(self, gesture: "inputCore.InputGesture") -> None:
-		if not _telegramIsInForeground():
-			_passGestureToApplication(gesture)
-			return
+	@script(description=_("Open main menu"))
+	def script_openMainMenu(self, gesture: object) -> None:
 		_telegramModule.openMainMenu()
 
-	@script(
-		# Translators: The description of a command to accept an incoming Telegram call.
-		description=_("Answer the incoming call"),
-		gesture="kb:alt+y",
-	)
-	def script_answerCall(self, gesture: "inputCore.InputGesture") -> None:
-		if not _telegramIsInForeground():
-			_passGestureToApplication(gesture)
-			return
-		_telegramModule.answerCall()
+	@script(description=_("Show links in the current message"))
+	def script_showMessageLinks(self, gesture: object) -> None:
+		_telegramModule.showMessageLinks(gesture)
 
-	@script(
-		# Translators: The description of a command to hang up a Telegram call.
-		description=_("Decline the incoming call, or end the call in progress"),
-		gesture="kb:alt+n",
-	)
-	def script_endCall(self, gesture: "inputCore.InputGesture") -> None:
-		if not _telegramIsInForeground():
-			_passGestureToApplication(gesture)
-			return
-		_telegramModule.endCall()
-
-	@script(
-		# Translators: The description of a command to toggle the microphone in a Telegram call.
-		description=_("Mute or unmute the microphone during a call"),
-		gesture="kb:alt+a",
-	)
-	def script_toggleCallMicrophone(self, gesture: "inputCore.InputGesture") -> None:
-		if not _telegramIsInForeground():
-			_passGestureToApplication(gesture)
-			return
-		_telegramModule.toggleCallMicrophone()
-
-	@script(
-		# Translators: The description of a command to toggle the camera in a Telegram call.
-		description=_("Turn the camera on or off during a call"),
-		gesture="kb:alt+v",
-	)
-	def script_toggleCallCamera(self, gesture: "inputCore.InputGesture") -> None:
-		if not _telegramIsInForeground():
-			_passGestureToApplication(gesture)
-			return
-		_telegramModule.toggleCallCamera()
+	@script(description=_("Switch chats and announce the chat name"))
+	def script_switchChat(self, gesture: object) -> None:
+		_telegramModule.switchChat(gesture)

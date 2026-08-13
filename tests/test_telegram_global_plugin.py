@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 import importlib.util
 from pathlib import Path
 import sys
@@ -9,84 +10,92 @@ import unittest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "addon" / "globalPlugins" / "telegramDesktop.py"
 
-ADDON_SUMMARY = "Telegram Desktop Accessibility"
+
+class _Role(Enum):
+	BUTTON = "button"
+	GROUPING = "grouping"
 
 
 class _FakeGlobalPlugin:
-	def getScript(self, gesture):
-		return self._fallbackScript
+	def __init__(self):
+		self.boundGestures = {}
+
+	def bindGestures(self, gestures):
+		self.boundGestures.update(gestures)
+
+	def removeGestureBinding(self, gesture):
+		if gesture not in self.boundGestures:
+			raise LookupError(gesture)
+		del self.boundGestures[gesture]
+
+
+class _FakeElement:
+	def __init__(self, name=""):
+		self.CurrentName = name
+
+	def GetCurrentPropertyValue(self, propertyId):
+		return self.CurrentName
 
 
 class _FakeObject:
 	def __init__(
 		self,
+		*,
+		automationId="",
+		className="",
+		role=None,
+		providerName="",
+		exposedName=None,
 		appName="telegram",
-		productName="Telegram Desktop",
-		appPath=r"C:\Program Files\Telegram Desktop\Telegram.exe",
 	):
-		self.appModule = types.SimpleNamespace(
-			appName=appName,
-			productName=productName,
-			appPath=appPath,
-		)
-		self.name = ""
-
-
-class _FakeGesture:
-	"""A keyboard gesture that records whether NVDA passed it to the application."""
-
-	def __init__(self):
-		self.sent = 0
-
-	def send(self):
-		self.sent += 1
-
-
-class _UnsendableGesture:
-	"""A gesture source such as braille, which cannot be sent to the application."""
-
-	def send(self):
-		raise NotImplementedError
+		self.appModule = types.SimpleNamespace(appName=appName)
+		self.UIAAutomationId = automationId
+		self.UIAClassName = className
+		self.UIAElement = _FakeElement(providerName)
+		self.role = role
+		self.name = providerName if exposedName is None else exposedName
 
 
 def _loadGlobalPluginModule():
-	telegramModule = types.ModuleType("qualifiedTelegramAppModule")
-	telegramModule.calls = []
-	telegramModule.focusChatList = lambda: telegramModule.calls.append("focus")
-	telegramModule.openMainMenu = lambda: telegramModule.calls.append("menu")
-	telegramModule.answerCall = lambda: telegramModule.calls.append("answer")
-	telegramModule.endCall = lambda: telegramModule.calls.append("end")
-	telegramModule.toggleCallMicrophone = lambda: telegramModule.calls.append("microphone")
-	telegramModule.toggleCallCamera = lambda: telegramModule.calls.append("camera")
-	telegramModule._cleanTelegramControlName = lambda obj: setattr(obj, "name", "cleaned")
-
-	codeAddon = types.SimpleNamespace(
-		loadModule=lambda name: telegramModule,
-		manifest={"summary": ADDON_SUMMARY},
-	)
 	addonHandler = types.ModuleType("addonHandler")
-	addonHandler.initTranslation = lambda: None
+	addonHandler.translationCalls = 0
+	telegramModule = types.SimpleNamespace(
+		calls=[],
+	)
+	telegramModule.focusChatList = lambda: telegramModule.calls.append("focusChatList")
+	telegramModule.openMainMenu = lambda: telegramModule.calls.append("openMainMenu")
+	telegramModule.showMessageLinks = lambda gesture: telegramModule.calls.append("showMessageLinks")
+	telegramModule.switchChat = lambda gesture: telegramModule.calls.append("switchChat")
+	codeAddon = types.SimpleNamespace(
+		loadModuleCalls=[],
+	)
+
+	def loadModule(name):
+		codeAddon.loadModuleCalls.append(name)
+		return telegramModule
+
+	codeAddon.loadModule = loadModule
 	addonHandler.getCodeAddon = lambda: codeAddon
+
+	def initTranslation():
+		addonHandler.translationCalls += 1
+		sys._getframe(1).f_globals["_"] = lambda message: f"translated:{message}"
+
+	addonHandler.initTranslation = initTranslation
 
 	api = types.ModuleType("api")
 	api.foregroundObject = None
 	api.getForegroundObject = lambda: api.foregroundObject
 
+	controlTypes = types.ModuleType("controlTypes")
+	controlTypes.Role = _Role
+
 	globalPluginHandler = types.ModuleType("globalPluginHandler")
 	globalPluginHandler.GlobalPlugin = _FakeGlobalPlugin
 
-	logHandler = types.ModuleType("logHandler")
-	logHandler.log = types.SimpleNamespace(debugWarning=lambda *args, **kwargs: None)
-
-	def fakeScript(*, description, gesture=None, gestures=None, **kwargs):
-		"""Mirror the parts of NVDA's script decorator this add-on relies on."""
-		collected = list(gestures or [])
-		if gesture is not None:
-			collected.append(gesture)
-
+	def fakeScript(*, description):
 		def decorator(function):
 			function.__doc__ = description
-			function.gestures = collected
 			return function
 
 		return decorator
@@ -95,25 +104,36 @@ def _loadGlobalPluginModule():
 	scriptHandler.script = fakeScript
 
 	importlibStub = types.ModuleType("importlib")
-	importlibStub.reload = lambda module: module
+	importlibStub.reloadCalls = []
+
+	def reloadModule(module):
+		importlibStub.reloadCalls.append(module)
+		return module
+
+	importlibStub.reload = reloadModule
+
+	uiaHandler = types.ModuleType("UIAHandler")
+	uiaHandler.UIA_NamePropertyId = "name"
 
 	stubs = {
 		"addonHandler": addonHandler,
 		"api": api,
+		"controlTypes": controlTypes,
 		"globalPluginHandler": globalPluginHandler,
 		"importlib": importlibStub,
-		"logHandler": logHandler,
 		"scriptHandler": scriptHandler,
+		"UIAHandler": uiaHandler,
 	}
 	previous = {name: sys.modules.get(name) for name in stubs}
 	sys.modules.update(stubs)
 	try:
 		spec = importlib.util.spec_from_file_location("telegram_global_plugin_under_test", MODULE_PATH)
 		module = importlib.util.module_from_spec(spec)
-		module._ = lambda message: message
 		assert spec.loader is not None
 		spec.loader.exec_module(module)
-		module._testApi = api
+		module._testAddonHandler = addonHandler
+		module._testCodeAddon = codeAddon
+		module._testImportlib = importlibStub
 		module._testTelegramModule = telegramModule
 		return module
 	finally:
@@ -127,184 +147,215 @@ def _loadGlobalPluginModule():
 class TelegramGlobalPluginTests(unittest.TestCase):
 	def setUp(self):
 		self.module = _loadGlobalPluginModule()
-		self.module._testApi.foregroundObject = _FakeObject()
 
-	def test_default_gestures_are_declared_so_nvda_can_reassign_them(self):
-		self.assertEqual(self.module.GlobalPlugin.script_focusChatList.gestures, ["kb:alt+1"])
-		self.assertEqual(self.module.GlobalPlugin.script_openMainMenu.gestures, ["kb:alt+m"])
-		self.assertEqual(self.module.GlobalPlugin.script_answerCall.gestures, ["kb:alt+y"])
-		self.assertEqual(self.module.GlobalPlugin.script_endCall.gestures, ["kb:alt+n"])
-		self.assertEqual(
-			self.module.GlobalPlugin.script_toggleCallMicrophone.gestures,
-			["kb:alt+a"],
-		)
-		self.assertEqual(self.module.GlobalPlugin.script_toggleCallCamera.gestures, ["kb:alt+v"])
+	def test_owned_app_module_is_loaded_and_refreshed_once(self):
+		self.assertEqual(self.module._testCodeAddon.loadModuleCalls, ["appModules.telegram"])
+		self.assertEqual(len(self.module._testImportlib.reloadCalls), 1)
+		self.assertEqual(self.module._testAddonHandler.translationCalls, 1)
 
-	def test_every_default_gesture_is_used_once(self):
-		gestures = [
-			gesture
-			for name in dir(self.module.GlobalPlugin)
-			if name.startswith("script_")
-			for gesture in getattr(self.module.GlobalPlugin, name).gestures
-		]
-
-		self.assertCountEqual(gestures, set(gestures))
-
-	def test_commands_are_grouped_under_this_addon_in_the_gesture_editor(self):
-		self.assertEqual(self.module.GlobalPlugin.scriptCategory, ADDON_SUMMARY)
-
-	def test_commands_are_described_for_the_gesture_editor(self):
-		descriptions = [
-			getattr(self.module.GlobalPlugin, name).__doc__
-			for name in dir(self.module.GlobalPlugin)
-			if name.startswith("script_")
-		]
-
-		self.assertEqual(
-			self.module.GlobalPlugin.script_focusChatList.__doc__,
-			"Move focus to chat list",
-		)
-		self.assertEqual(self.module.GlobalPlugin.script_openMainMenu.__doc__, "Open main menu")
-		self.assertEqual(
-			self.module.GlobalPlugin.script_answerCall.__doc__,
-			"Answer the incoming call",
-		)
-		self.assertTrue(all(descriptions))
-
-	def test_commands_forward_to_this_addons_qualified_app_module(self):
+	def test_gestures_are_bound_while_telegram_is_foreground(self):
 		plugin = self.module.GlobalPlugin()
 
-		plugin.script_focusChatList(_FakeGesture())
-		plugin.script_openMainMenu(_FakeGesture())
-		plugin.script_answerCall(_FakeGesture())
-		plugin.script_endCall(_FakeGesture())
-		plugin.script_toggleCallMicrophone(_FakeGesture())
-		plugin.script_toggleCallCamera(_FakeGesture())
+		plugin._updateGestureBindings(_FakeObject())
+
+		self.assertEqual(
+			plugin.boundGestures,
+			{
+				"kb:alt+1": "focusChatList",
+				"kb:alt+m": "openMainMenu",
+				"kb:control+enter": "showMessageLinks",
+				"kb:control+tab": "switchChat",
+				"kb:control+shift+tab": "switchChat",
+			},
+		)
+
+	def test_gestures_are_released_in_other_applications(self):
+		plugin = self.module.GlobalPlugin()
+		plugin._updateGestureBindings(_FakeObject())
+
+		plugin.event_foreground(_FakeObject(appName="notepad"), lambda: None)
+
+		self.assertEqual(plugin.boundGestures, {})
+
+	def test_gestures_are_bound_when_telegram_is_already_focused_on_reload(self):
+		plugin = self.module.GlobalPlugin()
+
+		plugin.event_gainFocus(_FakeObject(), lambda: None)
+
+		self.assertIn("kb:alt+1", plugin.boundGestures)
+
+	def test_repeated_updates_do_not_rebind_or_raise(self):
+		plugin = self.module.GlobalPlugin()
+		plugin._updateGestureBindings(_FakeObject())
+		plugin._updateGestureBindings(_FakeObject())
+		plugin._updateGestureBindings(_FakeObject(appName="notepad"))
+		plugin._updateGestureBindings(_FakeObject(appName="notepad"))
+
+		self.assertEqual(plugin.boundGestures, {})
+
+	def test_scripts_delegate_to_the_owned_app_module(self):
+		plugin = self.module.GlobalPlugin()
+
+		plugin.script_focusChatList(None)
+		plugin.script_openMainMenu(None)
+		plugin.script_showMessageLinks(None)
+		plugin.script_switchChat(None)
 
 		self.assertEqual(
 			self.module._testTelegramModule.calls,
-			["focus", "menu", "answer", "end", "microphone", "camera"],
+			["focusChatList", "openMainMenu", "showMessageLinks", "switchChat"],
 		)
 
-	def test_commands_pass_through_outside_telegram(self):
-		self.module._testApi.foregroundObject = _FakeObject("notepad")
+	def test_objects_without_an_app_module_are_ignored(self):
 		plugin = self.module.GlobalPlugin()
-		gestures = [_FakeGesture() for _index in range(6)]
 
-		plugin.script_focusChatList(gestures[0])
-		plugin.script_openMainMenu(gestures[1])
-		plugin.script_answerCall(gestures[2])
-		plugin.script_endCall(gestures[3])
-		plugin.script_toggleCallMicrophone(gestures[4])
-		plugin.script_toggleCallCamera(gestures[5])
+		plugin._updateGestureBindings(object())
 
-		self.assertEqual(self.module._testTelegramModule.calls, [])
-		self.assertEqual([gesture.sent for gesture in gestures], [1] * len(gestures))
+		self.assertEqual(plugin.boundGestures, {})
 
-	def test_unigram_is_not_treated_as_telegram_desktop_and_shortcuts_pass_through(self):
-		self.module._testApi.foregroundObject = _FakeObject(
-			productName="38833FF26BA1D.UnigramPreview",
-			appPath=r"C:\Program Files\WindowsApps\38833FF26BA1D.UnigramPreview\Unigram.exe",
-		)
-		plugin = self.module.GlobalPlugin()
-		gestures = [_FakeGesture() for _index in range(6)]
-
-		plugin.script_focusChatList(gestures[0])
-		plugin.script_openMainMenu(gestures[1])
-		plugin.script_answerCall(gestures[2])
-		plugin.script_endCall(gestures[3])
-		plugin.script_toggleCallMicrophone(gestures[4])
-		plugin.script_toggleCallCamera(gestures[5])
-
-		self.assertFalse(self.module._telegramIsInForeground())
-		self.assertEqual(self.module._testTelegramModule.calls, [])
-		self.assertEqual([gesture.sent for gesture in gestures], [1] * len(gestures))
-
-	def test_unknown_telegram_app_name_collision_fails_closed(self):
+	def test_profile_label_is_applied_before_focus_announcement(self):
 		obj = _FakeObject(
-			productName="Some Other Application",
-			appPath=r"C:\OtherApp\telegram.exe",
+			automationId="class Window::MainMenu.class Ui::UserpicButton",
+			className="class Ui::UserpicButton",
+			role=_Role.BUTTON,
 		)
-
-		self.assertFalse(self.module._isTelegramObject(obj))
-
-	def test_missing_telegram_metadata_fails_closed(self):
-		obj = _FakeObject(productName="", appPath="")
-
-		self.assertFalse(self.module._isTelegramObject(obj))
-
-	def test_gesture_reaches_the_application_outside_telegram(self):
-		self.module._testApi.foregroundObject = _FakeObject("notepad")
-		gesture = _FakeGesture()
-
-		self.module.GlobalPlugin().script_focusChatList(gesture)
-
-		self.assertEqual(gesture.sent, 1)
-
-	def test_gesture_is_kept_from_the_application_inside_telegram(self):
-		gesture = _FakeGesture()
-
-		self.module.GlobalPlugin().script_focusChatList(gesture)
-
-		self.assertEqual(gesture.sent, 0)
-
-	def test_plugin_does_not_claim_its_default_gestures_in_unigram(self):
-		self.module._testApi.foregroundObject = _FakeObject(
-			productName="38833FF26BA1D.UnigramPreview",
-			appPath=r"C:\Program Files\WindowsApps\38833FF26BA1D.UnigramPreview\Telegram.exe",
-		)
-		plugin = self.module.GlobalPlugin()
-		plugin._fallbackScript = object()
-
-		self.assertIsNone(plugin.getScript(_FakeGesture()))
-
-	def test_plugin_claims_its_default_gestures_in_telegram_desktop(self):
-		plugin = self.module.GlobalPlugin()
-		plugin._fallbackScript = object()
-
-		self.assertIs(plugin.getScript(_FakeGesture()), plugin._fallbackScript)
-
-	def test_unsendable_gesture_does_not_break_the_command(self):
-		self.module._testApi.foregroundObject = _FakeObject("notepad")
-
-		self.module.GlobalPlugin().script_openMainMenu(_UnsendableGesture())
-
-		self.assertEqual(self.module._testTelegramModule.calls, [])
-
-	def test_unreadable_foreground_fails_closed(self):
-		plugin = self.module.GlobalPlugin()
-		self.module._testApi.getForegroundObject = lambda: (_ for _ in ()).throw(RuntimeError())
-		gesture = _FakeGesture()
-
-		plugin.script_focusChatList(gesture)
-
-		self.assertEqual(self.module._testTelegramModule.calls, [])
-		self.assertEqual(gesture.sent, 1)
-
-	def test_telegram_name_is_cleaned_before_focus_continues(self):
-		obj = _FakeObject()
 		observedNames = []
 
 		self.module.GlobalPlugin().event_gainFocus(obj, lambda: observedNames.append(obj.name))
 
-		self.assertEqual(observedNames, ["cleaned"])
+		self.assertEqual(observedNames, ["translated:Profile"])
 
-	def test_non_telegram_object_is_never_renamed(self):
-		obj = _FakeObject("notepad")
-
-		self.module.GlobalPlugin().event_focusEntered(obj, lambda: None)
-
-		self.assertEqual(obj.name, "")
-
-	def test_unigram_object_is_never_renamed(self):
+	def test_accounts_label_is_applied_before_focus_announcement(self):
 		obj = _FakeObject(
-			productName="38833FF26BA1D.UnigramPreview",
-			appPath=r"C:\Program Files\WindowsApps\38833FF26BA1D.UnigramPreview\Unigram.exe",
+			automationId=("class Window::MainMenu.class Window::MainMenu::ToggleAccountsButton"),
+			className="class Window::MainMenu::ToggleAccountsButton",
+			role=_Role.BUTTON,
+		)
+		observedNames = []
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: observedNames.append(obj.name))
+
+		self.assertEqual(observedNames, ["translated:Accounts"])
+
+	def test_main_menu_group_is_labeled_before_focus_entered_announcement(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu",
+			className="class Window::MainMenu",
+			role=_Role.GROUPING,
+		)
+		observedNames = []
+
+		self.module.GlobalPlugin().event_focusEntered(obj, lambda: observedNames.append(obj.name))
+
+		self.assertEqual(observedNames, ["translated:Main menu"])
+
+	def test_unlabeled_main_menu_control_falls_back_to_the_menu_name(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu.class Ui::RippleButton",
+			className="class Ui::RippleButton",
+			role=_Role.BUTTON,
 		)
 
-		self.module.GlobalPlugin().event_focusEntered(obj, lambda: None)
+		self.module._cleanTelegramControlName(obj)
+
+		self.assertEqual(obj.name, "translated:Main menu")
+
+	def test_existing_provider_name_is_preserved(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu.class Ui::UserpicButton",
+			className="class Ui::UserpicButton",
+			role=_Role.BUTTON,
+			providerName="Telegram profile",
+		)
+
+		self.module._cleanTelegramControlName(obj)
+
+		self.assertEqual(obj.name, "Telegram profile")
+
+	def test_non_telegram_control_is_not_renamed(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu.class Ui::UserpicButton",
+			className="class Ui::UserpicButton",
+			role=_Role.BUTTON,
+			appName="otherApp",
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
 
 		self.assertEqual(obj.name, "")
+
+	def test_stickers_button_uses_current_provider_name(self):
+		obj = _FakeObject(
+			automationId="ButtonStickers",
+			className="ToggleButton",
+			role=_Role.BUTTON,
+			providerName="Emoji, stickers, GIFs, and more",
+			exposedName="",
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "Emoji, stickers, GIFs, and more")
+
+	def test_stickers_button_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId="ButtonStickers",
+			className="ToggleButton",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Emoji, stickers, and GIFs")
+
+	def test_voice_message_button_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId="btnVoiceMessage",
+			className="ToggleButton",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Record voice message")
+
+	def test_top_bar_suggestion_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId=("class MainWindow.class Dialogs::Widget.class Dialogs::TopBarSuggestionContent"),
+			className="class Dialogs::TopBarSuggestionContent",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Telegram suggestion")
+
+	def test_top_bar_suggestion_close_button_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId=(
+				"class MainWindow.class Dialogs::Widget."
+				"class Dialogs::TopBarSuggestionContent.class Ui::IconButton"
+			),
+			className="class Ui::IconButton",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Dismiss suggestion")
+
+	def test_top_bar_suggestion_provider_name_is_preserved(self):
+		obj = _FakeObject(
+			automationId=("class MainWindow.class Dialogs::Widget.class Dialogs::TopBarSuggestionContent"),
+			className="class Dialogs::TopBarSuggestionContent",
+			role=_Role.BUTTON,
+			providerName="Review new login",
+			exposedName="",
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "Review new login")
 
 
 if __name__ == "__main__":
