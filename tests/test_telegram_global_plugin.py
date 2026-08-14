@@ -181,10 +181,43 @@ class TelegramGlobalPluginTests(unittest.TestCase):
 
 	def test_gestures_are_bound_when_telegram_is_already_focused_on_reload(self):
 		plugin = self.module.GlobalPlugin()
+		self.module.api.foregroundObject = _FakeObject()
 
 		plugin.event_gainFocus(_FakeObject(), lambda: None)
 
 		self.assertIn("kb:alt+1", plugin.boundGestures)
+
+	def test_a_late_telegram_focus_event_does_not_bind_over_another_application(self):
+		plugin = self.module.GlobalPlugin()
+		plugin._updateGestureBindings(_FakeObject(appName="notepad"))
+		self.module.api.foregroundObject = _FakeObject(appName="notepad")
+
+		plugin.event_gainFocus(_FakeObject(), lambda: None)
+
+		self.assertEqual(plugin.boundGestures, {})
+
+	def test_an_unreadable_foreground_clears_telegram_bindings(self):
+		plugin = self.module.GlobalPlugin()
+		self.module.api.foregroundObject = _FakeObject()
+		plugin.event_gainFocus(_FakeObject(), lambda: None)
+
+		def raiseError():
+			raise RuntimeError("no foreground")
+
+		self.module.api.getForegroundObject = raiseError
+		plugin.event_gainFocus(_FakeObject(appName="notepad"), lambda: None)
+
+		self.assertEqual(plugin.boundGestures, {})
+
+	def test_a_missing_foreground_clears_telegram_bindings(self):
+		plugin = self.module.GlobalPlugin()
+		self.module.api.foregroundObject = _FakeObject()
+		plugin.event_gainFocus(_FakeObject(), lambda: None)
+
+		self.module.api.foregroundObject = None
+		plugin.event_gainFocus(_FakeObject(appName="notepad"), lambda: None)
+
+		self.assertEqual(plugin.boundGestures, {})
 
 	def test_repeated_updates_do_not_rebind_or_raise(self):
 		plugin = self.module.GlobalPlugin()
@@ -295,6 +328,7 @@ class TelegramGlobalPluginTests(unittest.TestCase):
 			className="class Ui::UserpicButton",
 			role=_Role.BUTTON,
 			providerName="Telegram profile",
+			exposedName="",
 		)
 
 		self.module._cleanTelegramControlName(obj)
