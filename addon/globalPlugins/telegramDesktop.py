@@ -250,8 +250,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def event_gainFocus(self, obj: object, nextHandler: Callable[[], None]) -> None:
 		# This also covers an already-open Telegram window after global plug-ins
 		# are reloaded, and guards against a missed foreground event.
-		self._updateGestureBindings(obj)
+		#
+		# The decision is taken from the foreground window rather than from the
+		# focused object: a Telegram focus event can arrive late, once another
+		# application is already in front, and binding on it would let these
+		# shortcuts swallow keys in that application.
+		try:
+			foreground = api.getForegroundObject()
+		except Exception:
+			foreground = None
+		if foreground is not None:
+			self._updateGestureBindings(foreground)
 		# Labels must be in place before NVDA's focus handler builds speech.
+		# This runs whatever the foreground turned out to be, because naming a
+		# Telegram control is safe regardless of which window is in front.
 		_cleanTelegramControlName(obj)
 		nextHandler()
 
