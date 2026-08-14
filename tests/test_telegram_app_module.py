@@ -202,8 +202,10 @@ def _loadTelegramModule(*, executeTwice=False):
 	api = types.ModuleType("api")
 	api.focusObject = None
 	api.foregroundObject = None
+	api.desktopObject = None
 	api.getFocusObject = lambda: api.focusObject
 	api.getForegroundObject = lambda: api.foregroundObject
+	api.getDesktopObject = lambda: api.desktopObject
 
 	appModuleHandler = types.ModuleType("appModuleHandler")
 	appModuleHandler.AppModule = object
@@ -580,6 +582,44 @@ class TelegramAppModuleTests(unittest.TestCase):
 		)
 
 		self.assertFalse(self.module.isTelegramMainMenuButton(button))
+
+	def test_main_window_is_used_when_a_notification_popup_is_in_front(self):
+		mainWindow = _FakeUIA(className="class MainWindow")
+		popup = _FakeUIA(className="class Ui::Toast")
+		self.module._testApi.foregroundObject = popup
+		self.module._testApi.desktopObject = _FakeUIA(children=[popup, mainWindow])
+
+		self.assertIs(self.module._telegramMainWindow(), mainWindow)
+
+	def test_the_foreground_main_window_is_used_directly(self):
+		mainWindow = _FakeUIA(className="class MainWindow")
+		self.module._testApi.foregroundObject = mainWindow
+		self.module._testApi.desktopObject = _FakeUIA(children=[])
+
+		self.assertIs(self.module._telegramMainWindow(), mainWindow)
+
+	def test_an_unrecognised_layout_keeps_the_foreground_object(self):
+		popup = _FakeUIA(className="class Ui::Toast")
+		self.module._testApi.foregroundObject = popup
+		self.module._testApi.desktopObject = _FakeUIA(children=[_FakeUIA(className="class Other")])
+
+		self.assertIs(self.module._telegramMainWindow(), popup)
+
+	def test_alt_m_finds_the_menu_while_a_notification_popup_is_in_front(self):
+		button = _FakeUIA(
+			role=_Role.BUTTON,
+			name="Main menu",
+			className="class Ui::IconButton",
+			automationId="class Dialogs::Widget.class Ui::RpWidget.class Ui::IconButton",
+		)
+		mainWindow = _FakeUIA(className="class MainWindow", children=[button])
+		popup = _FakeUIA(className="class Ui::Toast")
+		self.module._testApi.foregroundObject = popup
+		self.module._testApi.desktopObject = _FakeUIA(children=[popup, mainWindow])
+
+		self.module.AppModule().script_openMainMenu(None)
+
+		self.assertEqual(button.actionCount, 1)
 
 	def test_alt_m_activates_first_matching_button_without_changing_name(self):
 		button = _FakeUIA(
