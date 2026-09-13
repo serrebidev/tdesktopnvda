@@ -213,8 +213,8 @@ class TelegramGlobalPluginTests(unittest.TestCase):
 		plugin = self.module.GlobalPlugin()
 		self.module.api.foregroundObject = _FakeObject()
 		plugin.event_gainFocus(_FakeObject(), lambda: None)
-		self.module.api.foregroundObject = None
 
+		self.module.api.foregroundObject = None
 		plugin.event_gainFocus(_FakeObject(appName="notepad"), lambda: None)
 
 		self.assertEqual(plugin.boundGestures, {})
@@ -328,6 +328,7 @@ class TelegramGlobalPluginTests(unittest.TestCase):
 			className="class Ui::UserpicButton",
 			role=_Role.BUTTON,
 			providerName="Telegram profile",
+			exposedName="",
 		)
 
 		self.module._cleanTelegramControlName(obj)
