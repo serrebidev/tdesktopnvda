@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 import importlib.util
 from pathlib import Path
 import sys
@@ -8,6 +9,11 @@ import unittest
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "addon" / "globalPlugins" / "telegramDesktop.py"
+
+
+class _Role(Enum):
+	BUTTON = "button"
+	GROUPING = "grouping"
 
 
 class _FakeGlobalPlugin:
@@ -23,9 +29,33 @@ class _FakeGlobalPlugin:
 		del self.boundGestures[gesture]
 
 
+class _FakeElement:
+	def __init__(self, name=""):
+		self.CurrentName = name
+
+	def GetCurrentPropertyValue(self, propertyId):
+		return self.CurrentName
+
+
 class _FakeObject:
-	def __init__(self, *, appName="telegram"):
+	def __init__(
+		self,
+		*,
+		automationId="",
+		className="",
+		role=None,
+		providerName="",
+		exposedName=None,
+		appName="telegram",
+		children=(),
+	):
 		self.appModule = types.SimpleNamespace(appName=appName)
+		self.UIAAutomationId = automationId
+		self.UIAClassName = className
+		self.UIAElement = _FakeElement(providerName)
+		self.role = role
+		self.name = providerName if exposedName is None else exposedName
+		self.children = tuple(children)
 
 
 def _loadGlobalPluginModule():
@@ -59,6 +89,9 @@ def _loadGlobalPluginModule():
 	api.foregroundObject = None
 	api.getForegroundObject = lambda: api.foregroundObject
 
+	controlTypes = types.ModuleType("controlTypes")
+	controlTypes.Role = _Role
+
 	globalPluginHandler = types.ModuleType("globalPluginHandler")
 	globalPluginHandler.GlobalPlugin = _FakeGlobalPlugin
 
@@ -81,12 +114,17 @@ def _loadGlobalPluginModule():
 
 	importlibStub.reload = reloadModule
 
+	uiaHandler = types.ModuleType("UIAHandler")
+	uiaHandler.UIA_NamePropertyId = "name"
+
 	stubs = {
 		"addonHandler": addonHandler,
 		"api": api,
+		"controlTypes": controlTypes,
 		"globalPluginHandler": globalPluginHandler,
 		"importlib": importlibStub,
 		"scriptHandler": scriptHandler,
+		"UIAHandler": uiaHandler,
 	}
 	previous = {name: sys.modules.get(name) for name in stubs}
 	sys.modules.update(stubs)
@@ -209,6 +247,254 @@ class TelegramGlobalPluginTests(unittest.TestCase):
 		plugin._updateGestureBindings(object())
 
 		self.assertEqual(plugin.boundGestures, {})
+
+	def test_profile_label_is_applied_before_focus_announcement(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu.class Ui::UserpicButton",
+			className="class Ui::UserpicButton",
+			role=_Role.BUTTON,
+		)
+		observedNames = []
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: observedNames.append(obj.name))
+
+		self.assertEqual(observedNames, ["translated:Profile"])
+
+	def test_accounts_label_is_applied_before_focus_announcement(self):
+		obj = _FakeObject(
+			automationId=("class Window::MainMenu.class Window::MainMenu::ToggleAccountsButton"),
+			className="class Window::MainMenu::ToggleAccountsButton",
+			role=_Role.BUTTON,
+		)
+		observedNames = []
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: observedNames.append(obj.name))
+
+		self.assertEqual(observedNames, ["translated:Accounts"])
+
+	def test_main_menu_group_is_labeled_before_focus_entered_announcement(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu",
+			className="class Window::MainMenu",
+			role=_Role.GROUPING,
+		)
+		observedNames = []
+
+		self.module.GlobalPlugin().event_focusEntered(obj, lambda: observedNames.append(obj.name))
+
+		self.assertEqual(observedNames, ["translated:Main menu"])
+
+	def test_an_unknown_main_menu_control_is_left_unnamed(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu.class Ui::RippleButton",
+			className="class Ui::RippleButton",
+			role=_Role.BUTTON,
+		)
+
+		self.module._cleanTelegramControlName(obj)
+
+		self.assertEqual(obj.name, "")
+
+	def test_menu_ancestors_are_not_all_named_main_menu(self):
+		"""Naming every level made NVDA repeat "Main menu" once per Tab step."""
+		ancestors = [
+			_FakeObject(
+				automationId=f"class MainWindow.class Window::MainMenu.class {className}",
+				className=f"class {className}",
+				role=_Role.GROUPING,
+			)
+			for className in ("Ui::RpWidget", "Ui::ScrollArea", "Ui::LayerStackWidget")
+		]
+
+		for ancestor in ancestors:
+			self.module.GlobalPlugin().event_focusEntered(ancestor, lambda: None)
+
+		self.assertEqual([ancestor.name for ancestor in ancestors], ["", "", ""])
+
+	def test_the_menu_container_itself_is_still_named(self):
+		obj = _FakeObject(
+			automationId="class MainWindow.class Ui::LayerStackWidget.class Window::MainMenu",
+			className="class Window::MainMenu",
+			role=_Role.GROUPING,
+		)
+
+		self.module.GlobalPlugin().event_focusEntered(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Main menu")
+
+	def test_existing_provider_name_is_preserved(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu.class Ui::UserpicButton",
+			className="class Ui::UserpicButton",
+			role=_Role.BUTTON,
+			providerName="Telegram profile",
+		)
+
+		self.module._cleanTelegramControlName(obj)
+
+		self.assertEqual(obj.name, "Telegram profile")
+
+	def test_non_telegram_control_is_not_renamed(self):
+		obj = _FakeObject(
+			automationId="class Window::MainMenu.class Ui::UserpicButton",
+			className="class Ui::UserpicButton",
+			role=_Role.BUTTON,
+			appName="otherApp",
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "")
+
+	def test_stickers_button_uses_current_provider_name(self):
+		obj = _FakeObject(
+			automationId="ButtonStickers",
+			className="ToggleButton",
+			role=_Role.BUTTON,
+			providerName="Emoji, stickers, GIFs, and more",
+			exposedName="",
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "Emoji, stickers, GIFs, and more")
+
+	def test_stickers_button_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId="ButtonStickers",
+			className="ToggleButton",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Emoji, stickers, and GIFs")
+
+	def test_voice_message_button_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId="btnVoiceMessage",
+			className="ToggleButton",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Record voice message")
+
+	def test_top_bar_suggestion_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId=("class MainWindow.class Dialogs::Widget.class Dialogs::TopBarSuggestionContent"),
+			className="class Dialogs::TopBarSuggestionContent",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Telegram suggestion")
+
+	def test_top_bar_suggestion_close_button_has_translated_fallback(self):
+		obj = _FakeObject(
+			automationId=(
+				"class MainWindow.class Dialogs::Widget."
+				"class Dialogs::TopBarSuggestionContent.class Ui::IconButton"
+			),
+			className="class Ui::IconButton",
+			role=_Role.BUTTON,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Dismiss suggestion")
+
+	def test_top_bar_suggestion_provider_name_is_preserved(self):
+		obj = _FakeObject(
+			automationId=("class MainWindow.class Dialogs::Widget.class Dialogs::TopBarSuggestionContent"),
+			className="class Dialogs::TopBarSuggestionContent",
+			role=_Role.BUTTON,
+			providerName="Review new login",
+			exposedName="",
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "Review new login")
+
+	def test_class_chain_provider_name_does_not_block_the_label(self):
+		chain = "class MainWindow.class Dialogs::Widget.class Dialogs::TopBarSuggestionContent"
+		obj = _FakeObject(
+			automationId=chain,
+			className="class Dialogs::TopBarSuggestionContent",
+			role=_Role.BUTTON,
+			providerName=chain,
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "translated:Telegram suggestion")
+
+	def test_top_bar_suggestion_is_named_from_its_own_text(self):
+		obj = _FakeObject(
+			automationId=("class MainWindow.class Dialogs::Widget.class Dialogs::TopBarSuggestionContent"),
+			className="class Dialogs::TopBarSuggestionContent",
+			role=_Role.BUTTON,
+			children=[
+				_FakeObject(className="class Ui::FlatLabel", exposedName="Your Premium expires soon"),
+				_FakeObject(
+					className="class Ui::RpWidget",
+					exposedName="",
+					children=[_FakeObject(exposedName="Renew now")],
+				),
+			],
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "Your Premium expires soon, Renew now")
+
+	def test_suggestion_text_ignores_class_chain_labels_and_repeats(self):
+		obj = _FakeObject(
+			automationId=("class MainWindow.class Dialogs::Widget.class Dialogs::TopBarSuggestionContent"),
+			className="class Dialogs::TopBarSuggestionContent",
+			role=_Role.BUTTON,
+			children=[
+				_FakeObject(exposedName="class Ui::FlatLabel"),
+				_FakeObject(exposedName="Set your birthday"),
+				_FakeObject(exposedName="Set your birthday"),
+			],
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "Set your birthday")
+
+	def test_unknown_control_stops_announcing_its_class_chain(self):
+		chain = "class MainWindow.class Ui::RpWidget.class Ui::IconButton"
+		obj = _FakeObject(automationId=chain, className="class Ui::IconButton", role=_Role.BUTTON)
+		obj.name = chain
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "")
+
+	def test_a_real_name_containing_dots_is_left_alone(self):
+		obj = _FakeObject(
+			automationId="class MainWindow.class Ui::RpWidget",
+			className="class Ui::RpWidget",
+			role=_Role.BUTTON,
+			providerName="holiday.photo.jpg",
+		)
+
+		self.module.GlobalPlugin().event_gainFocus(obj, lambda: None)
+
+		self.assertEqual(obj.name, "holiday.photo.jpg")
+
+	def test_rtti_class_chain_detection(self):
+		self.assertTrue(self.module._isRttiClassChain("class Ui::IconButton"))
+		self.assertTrue(self.module._isRttiClassChain("class MainWindow.struct Dialogs::Widget"))
+		self.assertFalse(self.module._isRttiClassChain(""))
+		self.assertFalse(self.module._isRttiClassChain("Send a Gift"))
+		self.assertFalse(self.module._isRttiClassChain("class of 99"))
+		self.assertFalse(self.module._isRttiClassChain("class MainWindow.Send a Gift"))
 
 
 if __name__ == "__main__":

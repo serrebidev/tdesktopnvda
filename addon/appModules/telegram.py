@@ -49,6 +49,7 @@ _CHAT_LIST_CLASS_NAME = "Dialogs::InnerWidget"
 _DIALOGS_WIDGET_CLASS_NAME = "Dialogs::Widget"
 _ICON_BUTTON_CLASS_NAME = "Ui::IconButton"
 _MAIN_MENU_CLASS_NAME = "Window::MainMenu"
+_MAIN_WINDOW_CLASS_NAME = "MainWindow"
 _SIDEBAR_BUTTON_CLASS_NAME = "Ui::SideBarButton"
 _HISTORY_TOP_BAR_CLASS_NAME = "HistoryView::TopBarWidget"
 _RTTI_CLASS_PREFIXES = ("class ", "struct ")
@@ -955,6 +956,40 @@ def _foregroundObject() -> object | None:
 		return None
 
 
+def _appName(obj: object) -> str:
+	try:
+		return obj.appModule.appName.casefold()
+	except Exception:
+		return ""
+
+
+def _isTelegramMainWindow(obj: object) -> bool:
+	return obj is not None and _normalizedClassName(obj) == _MAIN_WINDOW_CLASS_NAME
+
+
+def _telegramMainWindow() -> object | None:
+	"""Return Telegram's main window, not merely whichever window is in front.
+
+	Telegram's notification popups are windows of the same process, so the
+	shortcuts still bind while one holds the foreground. Searching that popup
+	for the chat list or the menu button finds neither, and the command reports
+	itself unavailable while the main window sits behind it. Fall back to the
+	foreground object so an unrecognised layout behaves as it did before.
+	"""
+	root = _foregroundObject()
+	if _isTelegramMainWindow(root):
+		return root
+	appName = _appName(root)
+	try:
+		children = api.getDesktopObject().children
+	except Exception:
+		return root
+	for child in children or ():
+		if _isTelegramMainWindow(child) and _appName(child) == appName:
+			return child
+	return root
+
+
 def _focusObject() -> object | None:
 	try:
 		return api.getFocusObject()
@@ -1119,7 +1154,7 @@ def focusChatList(*, closeMainMenu: bool = True, identity: _ForegroundIdentity |
 			ui.message(name)
 		return
 
-	root = _foregroundObject()
+	root = _telegramMainWindow()
 	chatList = _findTelegramChatListFromPoints(root) if root is not None else None
 	if chatList is None and root is not None:
 		chatList = _findTelegramChatList(root)
@@ -1235,7 +1270,7 @@ def switchChat(gesture: object) -> None:
 
 def openMainMenu() -> None:
 	"""Invoke Telegram's main-menu button."""
-	root = _foregroundObject()
+	root = _telegramMainWindow()
 	button = _findTelegramMainMenuButtonFromPoints(root) if root is not None else None
 	if button is None and root is not None:
 		button = _findTelegramMainMenuButton(root)
