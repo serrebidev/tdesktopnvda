@@ -259,8 +259,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			foreground = api.getForegroundObject()
 		except Exception:
 			foreground = None
-		if foreground is not None:
-			self._updateGestureBindings(foreground)
+		# A failed foreground lookup cannot safely justify keeping process-wide
+		# shortcuts bound. Fail closed so stale Telegram bindings never swallow
+		# the same gestures after the user has moved to another application.
+		self._updateGestureBindings(foreground)
 		# Labels must be in place before NVDA's focus handler builds speech.
 		# This runs whatever the foreground turned out to be, because naming a
 		# Telegram control is safe regardless of which window is in front.

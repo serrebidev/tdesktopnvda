@@ -105,6 +105,7 @@ class _FakeUIA:
 		*,
 		role=None,
 		name="",
+		value="",
 		className="",
 		automationId="",
 		states=None,
@@ -118,6 +119,7 @@ class _FakeUIA:
 		self.windowHandle = windowHandle
 		self.role = role
 		self.name = name
+		self.value = value
 		self.UIAClassName = className
 		self.UIAAutomationId = automationId
 		self.states = set(states or ())
@@ -314,6 +316,10 @@ def _loadTelegramModule(*, executeTwice=False):
 		debug=lambda *args, **kwargs: None,
 		exception=lambda *args, **kwargs: None,
 	)
+	mouseHandler = types.ModuleType("mouseHandler")
+	mouseHandler.doPrimaryClick = lambda: None
+	winUser.getCursorPos = lambda: (0, 0)
+	winUser.setCursorPos = lambda *position: None
 
 	stubs = {
 		"addonHandler": addonHandler,
@@ -329,6 +335,7 @@ def _loadTelegramModule(*, executeTwice=False):
 		"displayModel": displayModel,
 		"locationHelper": locationHelper,
 		"logHandler": logHandler,
+		"mouseHandler": mouseHandler,
 		"NVDAObjects": nvdaObjects,
 		"NVDAObjects.UIA": uiaModule,
 		"queueHandler": queueHandler,
@@ -1121,6 +1128,13 @@ class TelegramAppModuleTests(unittest.TestCase):
 		self.assertEqual(redacted, "https://example.com")
 		self.assertNotIn("password", redacted)
 
+	def test_logging_never_records_a_mailto_recipient(self):
+		redacted = self.module._redactedLink("mailto:private-recipient@example.com?subject=secret")
+
+		self.assertEqual(redacted, "mailto:")
+		self.assertNotIn("private-recipient", redacted)
+		self.assertNotIn("secret", redacted)
+
 	def test_file_paths_in_message_text_become_openable_targets(self):
 		text = (
 			"Local C:\\Users\\me\\Reports\\q3.pdf and "
@@ -1157,6 +1171,35 @@ class TelegramAppModuleTests(unittest.TestCase):
 			[("attachment", "Quarterly report.pdf")],
 		)
 		self.assertIs(targets[0].value, document)
+
+	def test_control_enter_uses_telegram_filename_field_and_message_action(self):
+		fileName = _FakeUIA(name="Filename", value="Weather Radar Pro v2026.16.1 @channel.apk")
+		body = _FakeUIA(name="Message", value="Weather Radar Pro\nVersion: 2026.16.1")
+		message = _FakeUIA(
+			role=_Role.LISTITEM,
+			name="File, Not downloaded, Weather Radar Pro v2026.16.1 @channel.apk, 77.4 MB",
+			children=[fileName, body],
+		)
+		_FakeUIA(role=_Role.LIST, automationId="ChatsList", children=[message])
+		self.module._downloadedAttachmentPath = lambda name: ""
+		clicked = []
+		self.module._clickAttachmentAction = lambda obj: clicked.append(obj) or True
+
+		targets = self.module.messageTargets(message)
+		self.module._openMessageAttachment(targets[0])
+
+		self.assertEqual(
+			[(target.kind, target.label) for target in targets],
+			[("attachment", "Weather Radar Pro v2026.16.1 @channel.apk")],
+		)
+		self.assertEqual(clicked, [message])
+		self.assertEqual(fileName.actionCount, 0)
+
+	def test_message_body_field_is_not_taken_for_an_attachment(self):
+		body = _FakeUIA(name="Message", value="The notes are in the shared folder\nSee report.pdf")
+		message = _FakeUIA(role=_Role.LISTITEM, name="The notes are in the shared folder", children=[body])
+
+		self.assertEqual(self.module.attachmentsFromMessage(message), ())
 
 	def test_downloaded_attachment_is_opened_from_disk(self):
 		opened = []
