@@ -5,3 +5,12 @@ Telegram Desktop Accessibility is an NVDA add-on for Telegram Desktop on Windows
 Telegram Desktop is Telegram's. NVDA is NV Access's. Ken Chang's add-on is the original; this repository extends it. This add-on only adds the commands and labels between them.
 
 Questions and bug reports are welcome in the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects). More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com).
+
+
+## About this project
+
+- GitHub profile: [serrebidev](https://github.com/serrebidev)
+- Repository (GitHub): [https://github.com/serrebidev/tdesktopnvda](https://github.com/serrebidev/tdesktopnvda)
+- Repository (Forgejo): [https://git.serrebiradio.com/serrebi/tdesktopnvda](https://git.serrebiradio.com/serrebi/tdesktopnvda)
+- Projects site: [projects.serrebiradio.com](https://projects.serrebiradio.com)
+- Questions and bug reports: [SerrebiProjects Telegram group](https://t.me/SerrebiProjects)
