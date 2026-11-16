@@ -10,7 +10,9 @@ addon_info = AddonInfo(
 	addon_description=_(
 		"""Improves Telegram Desktop accessibility for NVDA users.
 
-Adds Alt+1 to move focus to the chat list, Alt+M to open Telegram's main menu, Ctrl+Tab to announce the chat you switch to, and Ctrl+Enter to open the links and files a message holds. The add-on uses Telegram's stable UIA class information and leaves Telegram's native accessible names unchanged."""
+Adds Alt+1 to move focus to the chat list, Alt+M to open Telegram's main menu, Ctrl+Tab to announce the chat you switch to, and Ctrl+Enter to open the links and files a message holds. The add-on uses Telegram's stable UIA class information and leaves Telegram's native accessible names unchanged.
+
+Based on keyang556/tdesktopnvda by Ken Chang. Author: serrebidev. GitHub: https://github.com/serrebidev/tdesktopnvda. Forgejo: https://git.serrebiradio.com/serrebi/tdesktopnvda. Projects: https://projects.serrebiradio.com. Telegram: https://t.me/SerrebiProjects. Full credits: CREDITS.md."""
 	),
 	addon_version="0.2.3",
 	addon_changelog=_(
