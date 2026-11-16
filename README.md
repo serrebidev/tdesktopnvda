@@ -1,5 +1,11 @@
 # Telegram Desktop Accessibility for NVDA
 
+
+[![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
+
+**Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects), the fastest place to get help.
+
+More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com)
 ## Overview
 
 Telegram Desktop Accessibility is an NVDA add-on for Telegram Desktop on Windows. It adds direct navigation commands and announces the active chat while switching conversations, leaving Telegram's native accessibility behavior and accessible names unchanged.
@@ -155,3 +161,7 @@ uv run scons
 ```
 
 The generated `.nvda-addon` package can be installed through NVDA's Add-on Store.
+
+## Credits
+
+See [CREDITS.md](CREDITS.md) for where the ideas behind this project came from, and the third-party projects it builds on.
